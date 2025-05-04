@@ -5,6 +5,88 @@ const heliusService = require('../services/heliusService');
 const alchemyService = require('../services/alchemyService');
 const birdeyeService = require('../services/birdeyeService');
 const jupiterService = require('../services/jupiterService');
+const ResponseUtils = require('../utils/responseUtils');
+
+/**
+ * @route GET /api/portfolio/:walletAddress
+ * @description Récupère les informations complètes d'un portefeuille
+ * @access Public
+ */
+router.get('/:walletAddress', async (req, res, next) => {
+  try {
+    const { walletAddress } = req.params;
+    
+    // Récupération du solde SOL via Alchemy
+    let nativeBalance = null;
+    let tokenAccounts = [];
+    
+    try {
+      const balances = await alchemyService.getBalances(walletAddress);
+      nativeBalance = balances.nativeBalance;
+      tokenAccounts = balances.tokenAccounts || [];
+      
+      // Enrichir les données des tokens avec les prix et métadonnées
+      if (tokenAccounts.length > 0) {
+        const tokenMints = tokenAccounts
+          .map(token => token.account?.data?.parsed?.info?.mint || token.mint)
+          .filter(mint => !!mint);
+        
+        if (tokenMints.length > 0) {
+          try {
+            // Récupérer les prix en parallèle pour optimiser le temps de réponse
+            const tokenPricePromises = tokenMints.map(mint => 
+              birdeyeService.getTokenMetadata(mint)
+                .catch(() => null)
+            );
+            
+            const tokenMetadataResults = await Promise.all(tokenPricePromises);
+            
+            // Créer une map pour accéder facilement aux métadonnées par mint address
+            const metadataMap = {};
+            tokenMetadataResults.forEach((result, index) => {
+              if (result && result.data) {
+                metadataMap[tokenMints[index]] = result.data;
+              }
+            });
+            
+            // Enrichir les tokens avec les métadonnées
+            tokenAccounts = tokenAccounts.map(token => {
+              const mintAddress = token.account?.data?.parsed?.info?.mint || token.mint;
+              if (mintAddress && metadataMap[mintAddress]) {
+                return {
+                  ...token,
+                  metadata: metadataMap[mintAddress],
+                  // Extraire les informations clés pour faciliter l'accès
+                  symbol: metadataMap[mintAddress].symbol || 'UNKNOWN',
+                  name: metadataMap[mintAddress].name || 'Unknown Token',
+                  logoURI: metadataMap[mintAddress].logoURI || null,
+                  price: {
+                    usd: metadataMap[mintAddress].price || 0
+                  }
+                };
+              }
+              return token;
+            });
+          } catch (error) {
+            console.warn('Erreur lors de l\'enrichissement des données de tokens:', error.message);
+            // Continuer avec les données de base en cas d'erreur
+          }
+        }
+      }
+      
+      res.json(ResponseUtils.success({
+        walletAddress,
+        nativeBalance,
+        tokenAccounts
+      }));
+    } catch (error) {
+      console.error('Erreur lors de la récupération des données du portefeuille:', error);
+      throw error;
+    }
+  } catch (error) {
+    next(error);
+  }
+});
 
 /**
  * @route GET /api/portfolio/balances/:walletAddress
