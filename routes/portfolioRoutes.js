@@ -264,11 +264,14 @@ router.get('/history/:walletAddress', async (req, res, next) => {
     let transactionSignatures = [];
     try {
       console.log(`Récupération des signatures via Helius pour ${walletAddress}`);
-      transactionSignatures = await heliusService.getTransactionHistory(walletAddress, parseInt(limit), before);
+      const result = await heliusService.getTransactionHistory(walletAddress, parseInt(limit), before);
+      // Vérification défensive que result est défini et un tableau
+      transactionSignatures = Array.isArray(result) ? result : [];
       console.log(`${transactionSignatures.length} signatures récupérées avec succès via Helius`);
     } catch (error) {
       console.error(`Erreur lors de la récupération des signatures: ${error.message}`);
-      throw error;
+      // Même en cas d'erreur, continuer avec un tableau vide plutôt que de propager l'erreur
+      transactionSignatures = [];
     }
     
     if (!transactionSignatures || transactionSignatures.length === 0) {
@@ -295,7 +298,9 @@ router.get('/history/:walletAddress', async (req, res, next) => {
       // Traiter chaque signature dans le lot en parallèle
       const batchPromises = batch.map(async (sigInfo) => {
         try {
-          const signature = sigInfo.signature;
+          // Vérifier que sigInfo et signature existent
+          if (!sigInfo) return null;
+          const signature = sigInfo.signature || sigInfo.id;
           if (!signature) return null;
           
           // COPIE EXACTE DE LA LOGIQUE DE /api/transaction/:signature
