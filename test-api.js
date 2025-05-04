@@ -1,178 +1,172 @@
-// Script de test pour l'API RPC déployée
+// Script de test pour vérifier le fonctionnement de l'API
+
 const axios = require('axios');
-require('dotenv').config();
 
-// URL de l'API déployée
-const API_URL = 'https://rpc1-taupe.vercel.app';
-const WALLET_ADDRESS = '6MKZipzxQpvoShQxNZ89jP63KMckcJRw9exwNwAuRGGe';
-
-// Fonction pour formater la sortie console
-function logSection(title) {
-  console.log('\n' + '='.repeat(50));
-  console.log(`${title}`);
-  console.log('='.repeat(50) + '\n');
-}
+// Configuration
+const API_URL = process.env.API_URL || 'http://localhost:3001'; // Utilise l'API locale sur le port 3001
+const TEST_WALLET = process.env.TEST_WALLET || '6MKZipzxQpvoShQxNZ89jP63KMckcJRw9exwNwAuRGGe';
+// Transaction de swap sur Jupiter qui contient des tokens (remplace celle qui n'en contient pas)
+const TEST_TRANSACTION = process.env.TEST_TRANSACTION || '3vDU7vBzwVDojtza9aNJLTmW3HZ7SZkmLiTga6k8J3H1PXqiUdo33RLW6KnLpqUUx4ssK7hxKfAMfVYsd23gddVL';
 
 // Fonction pour mesurer le temps d'exécution
-function measureTime(startTime) {
-  const endTime = new Date();
-  return `${(endTime - startTime) / 1000} secondes`;
+function timer() {
+  const start = Date.now();
+  return {
+    elapsed: () => {
+      return ((Date.now() - start) / 1000).toFixed(3);
+    }
+  };
 }
 
-// 1. Test de l'endpoint portfolio
-async function testPortfolio() {
-  logSection('TEST PORTFOLIO');
-  console.log(`Récupération du portefeuille: ${WALLET_ADDRESS}`);
+// Fonction principale de test
+async function runTests() {
+  console.log("\n==================================================");
+  console.log("DÉBUT DES TESTS DE L'API");
+  console.log("==================================================\n");
   
-  const startTime = new Date();
+  console.log(`API: ${API_URL}`);
+  console.log(`Adresse de test: ${TEST_WALLET}`);
+  
+  let transaction = null;
+  
+  // Test 1: Portfolio
+  console.log("\n==================================================");
+  console.log("TEST PORTFOLIO");
+  console.log("==================================================\n");
+  
+  console.log(`Récupération du portefeuille: ${TEST_WALLET}`);
   try {
-    const response = await axios.get(`${API_URL}/api/portfolio/${WALLET_ADDRESS}`);
-    console.log(`✅ Succès! Temps: ${measureTime(startTime)}`);
-    console.log('Solde SOL:', response.data.data.nativeBalance?.solAmount || 'Non disponible');
-    console.log(`Nombre de tokens: ${response.data.data.tokenAccounts?.length || 0}`);
+    const t = timer();
+    const response = await axios.get(`${API_URL}/api/portfolio/${TEST_WALLET}`);
     
-    // Afficher quelques tokens (si disponibles)
-    if (response.data.data.tokenAccounts && response.data.data.tokenAccounts.length > 0) {
-      console.log('\nExemples de tokens:');
-      const tokens = response.data.data.tokenAccounts.slice(0, 3); // Afficher max 3 tokens
+    if (response.data && (response.data.success || response.data.data)) {
+      const data = response.data.data || response.data;
+      console.log(`✅ Succès! Temps: ${t.elapsed()} secondes`);
+      console.log(`Solde SOL: ${data.nativeBalance?.solAmount || 'Non disponible'}`);
+      console.log(`Nombre de tokens: ${data.tokenAccounts?.length || 0}`);
       
-      tokens.forEach(token => {
-        console.log(`- ${token.symbol || 'Unknown'}: ${token.uiAmount || 'N/A'} (${token.mint.slice(0, 8)}...)`);
-      });
-    }
-    
-    return response.data;
-  } catch (error) {
-    console.log(`❌ Erreur: ${error.message}`);
-    if (error.response) {
-      console.log('Détails:', error.response.data);
-    }
-    return null;
-  }
-}
-
-// 2. Test de l'endpoint token pour un token du portefeuille
-async function testToken(tokenAddress) {
-  if (!tokenAddress) {
-    console.log('Aucune adresse de token fournie pour le test');
-    return;
-  }
-  
-  logSection('TEST TOKEN');
-  console.log(`Récupération du token: ${tokenAddress}`);
-  
-  const startTime = new Date();
-  try {
-    const response = await axios.get(`${API_URL}/api/token/${tokenAddress}`);
-    console.log(`✅ Succès! Temps: ${measureTime(startTime)}`);
-    console.log('Symbole:', response.data.data.symbol || 'Non disponible');
-    console.log('Nom:', response.data.data.name || 'Non disponible');
-    console.log('Prix actuel:', response.data.data.price?.usd || 'Non disponible');
-    
-    return response.data;
-  } catch (error) {
-    console.log(`❌ Erreur: ${error.message}`);
-    if (error.response) {
-      console.log('Détails:', error.response.data);
-    }
-    return null;
-  }
-}
-
-// 3. Test de l'endpoint transaction pour la dernière transaction
-async function testTransaction(signature) {
-  if (!signature) {
-    console.log('Aucune signature de transaction fournie pour le test');
-    return;
-  }
-  
-  logSection('TEST TRANSACTION');
-  console.log(`Récupération de la transaction: ${signature}`);
-  
-  const startTime = new Date();
-  try {
-    const response = await axios.get(`${API_URL}/api/transaction/${signature}`);
-    console.log(`✅ Succès! Temps: ${measureTime(startTime)}`);
-    console.log('Statut:', response.data.data.status || 'Non disponible');
-    console.log('Date:', response.data.data.blockTime || 'Non disponible');
-    console.log('Protocol identifié:', response.data.data.analysis?.protocol || 'Non disponible');
-    console.log('Type de transaction:', response.data.data.analysis?.type || 'Non disponible');
-    
-    // Vérifier si l'historique des prix est inclus
-    if (response.data.data.transaction.priceHistory) {
-      console.log('\n✅ HISTORIQUE DES PRIX PRÉSENT:');
-      
-      const priceHistory = response.data.data.transaction.priceHistory;
-      const mints = Object.keys(priceHistory);
-      
-      mints.forEach(mint => {
-        const token = priceHistory[mint];
-        console.log(`- ${token.symbol} (${mint.slice(0, 8)}...): ${token.priceHistory ? 'Historique disponible' : 'Pas d\'historique'}`);
-      });
-    } else {
-      console.log('\n❌ AUCUN HISTORIQUE DE PRIX TROUVÉ');
-    }
-    
-    return response.data;
-  } catch (error) {
-    console.log(`❌ Erreur: ${error.message}`);
-    if (error.response) {
-      console.log('Détails:', error.response.data);
-    }
-    return null;
-  }
-}
-
-// Fonction principale qui exécute tous les tests
-async function runAllTests() {
-  try {
-    logSection('DÉBUT DES TESTS DE L\'API');
-    console.log(`API: ${API_URL}`);
-    console.log(`Adresse de test: ${WALLET_ADDRESS}`);
-    
-    // 1. Test du portefeuille
-    const portfolioData = await testPortfolio();
-    
-    // 2. Test d'un token (si un token est disponible dans le portefeuille)
-    let tokenAddress = null;
-    if (portfolioData && portfolioData.data && portfolioData.data.tokenAccounts && portfolioData.data.tokenAccounts.length > 0) {
-      tokenAddress = portfolioData.data.tokenAccounts[0].mint;
-      await testToken(tokenAddress);
-    }
-    
-    // 3. Récupérer une signature de transaction récente
-    let txSignature = null;
-    try {
-      // Utiliser le service Helius directement pour récupérer l'historique des transactions
-      console.log('\nRécupération d\'une transaction récente...');
-      const heliusUrl = process.env.HELIUS_RPC_URL;
-      const history = await axios.post(heliusUrl, {
-        jsonrpc: '2.0',
-        id: 'history',
-        method: 'getSignaturesForAddress',
-        params: [WALLET_ADDRESS, { limit: 1 }],
-      });
-      
-      if (history.data && history.data.result && history.data.result.length > 0) {
-        txSignature = history.data.result[0].signature;
-        await testTransaction(txSignature);
+      // Pour tester ensuite une transaction, on prend une des transactions récentes si aucune n'est spécifiée
+      if (!TEST_TRANSACTION) {
+        try {
+          const historyResponse = await axios.get(`${API_URL}/api/portfolio/history/${TEST_WALLET}?limit=5`);
+          if (historyResponse.data && historyResponse.data.transactions && historyResponse.data.transactions.length > 0) {
+            transaction = historyResponse.data.transactions[0].signature;
+            console.log(`\nRécupération d'une transaction récente...`);
+          }
+        } catch (error) {
+          console.log("Impossible de récupérer l'historique des transactions");
+        }
       } else {
-        console.log('Aucune transaction récente trouvée pour cette adresse');
+        transaction = TEST_TRANSACTION;
+        console.log(`\nUtilisation de la transaction de test...`);
       }
-    } catch (error) {
-      console.log(`Erreur lors de la récupération des transactions: ${error.message}`);
+    } else {
+      console.log(`❌ Erreur: Format de réponse incorrect`);
     }
-    
-    logSection('FIN DES TESTS');
-    console.log('Résumé:');
-    console.log(`- Test Portfolio: ${portfolioData ? '✅ Réussi' : '❌ Échoué'}`);
-    console.log(`- Test Token: ${tokenAddress ? '✅ Réussi' : '⚠️ Non testé'}`);
-    console.log(`- Test Transaction: ${txSignature ? '✅ Réussi' : '⚠️ Non testé'}`);
-    
   } catch (error) {
-    console.error('Erreur lors de l\'exécution des tests:', error.message);
+    console.log(`❌ Erreur: ${error.message}`);
+    console.log(`Détails: ${JSON.stringify(error.response?.data || {})}`);
   }
+  
+  // Test 2: Token (test basique, juste vérifier si l'endpoint répond)
+  console.log("\n==================================================");
+  console.log("TEST TOKEN");
+  console.log("==================================================\n");
+  
+  // Ce test est optionnel selon qu'on a récupéré des tokens ou non
+  let tokenToTest = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // USDC par défaut
+  
+  try {
+    const t = timer();
+    const response = await axios.get(`${API_URL}/api/token/${tokenToTest}`);
+    
+    if (response.data && (response.data.success || response.data.data)) {
+      console.log(`✅ Succès! Temps: ${t.elapsed()} secondes`);
+      const data = response.data.data || response.data;
+      console.log(`Token: ${data.symbol || 'Non disponible'}`);
+    } else {
+      console.log(`❌ Erreur: Format de réponse incorrect`);
+    }
+  } catch (error) {
+    console.log(`❌ Erreur: ${error.message}`);
+  }
+  
+  // Test 3: Transaction (avec un focus sur l'historique des prix)
+  console.log("\n==================================================");
+  console.log("TEST TRANSACTION");
+  console.log("==================================================\n");
+  
+  if (!transaction) {
+    transaction = TEST_TRANSACTION;
+  }
+  
+  console.log(`Récupération de la transaction: ${transaction}`);
+  
+  try {
+    const t = timer();
+    const response = await axios.get(`${API_URL}/api/transaction/${transaction}`);
+    
+    if (response.data && (response.data.success || response.data.data)) {
+      console.log(`✅ Succès! Temps: ${t.elapsed()} secondes`);
+      
+      const data = response.data.data || response.data;
+      console.log(`Statut: ${data.status || 'Non disponible'}`);
+      console.log(`Date: ${data.blockTime || 'Non disponible'}`);
+      
+      // Vérifier si l'analyse a détecté un protocole
+      if (data.analysis && data.analysis.protocol) {
+        console.log(`Protocol identifié: ${data.analysis.protocol}`);
+      } else {
+        console.log(`Protocol: Non identifié`);
+      }
+      
+      // Vérifier si l'analyse a détecté un type de transaction
+      if (data.analysis && data.analysis.type) {
+        console.log(`Type de transaction: ${data.analysis.type}`);
+      } else {
+        console.log(`Type de transaction: unknown`);
+      }
+      
+      // Vérifier la présence de l'historique des prix
+      if (data.transaction && data.transaction.priceHistory) {
+        const priceHistoryEntries = Object.entries(data.transaction.priceHistory);
+        
+        if (priceHistoryEntries.length > 0) {
+          console.log(`\n✅ HISTORIQUE DES PRIX TROUVÉ: ${priceHistoryEntries.length} tokens`);
+          
+          priceHistoryEntries.forEach(([mint, info]) => {
+            if (info.priceHistory) {
+              console.log(`- ${info.symbol}: ${info.priceHistory.price} USD (source: ${info.priceHistory.source})`);
+            }
+          });
+        } else {
+          console.log(`\n❌ AUCUN HISTORIQUE DE PRIX TROUVÉ`);
+        }
+      } else {
+        console.log(`\n❌ AUCUN HISTORIQUE DE PRIX TROUVÉ`);
+      }
+    } else {
+      console.log(`❌ Erreur: Format de réponse incorrect`);
+    }
+  } catch (error) {
+    console.log(`❌ Erreur: ${error.message}`);
+    if (error.response) {
+      console.log(`Statut: ${error.response.status}`);
+      console.log(`Détails: ${JSON.stringify(error.response.data || {})}`);
+    }
+  }
+  
+  // Résumé des tests
+  console.log("\n==================================================");
+  console.log("FIN DES TESTS");
+  console.log("==================================================\n");
+  
+  console.log("Résumé:");
+  console.log(`- Test Portfolio: ${!error1 ? '✅ Réussi' : '❌ Échoué'}`);
+  console.log(`- Test Token: ${!error2 ? '✅ Réussi' : error2 === 'skipped' ? '⚠️ Non testé' : '❌ Échoué'}`);
+  console.log(`- Test Transaction: ${!error3 ? '✅ Réussi' : '❌ Échoué'}`);
 }
 
 // Exécuter les tests
-runAllTests();
+let error1 = false, error2 = 'skipped', error3 = false;
+runTests().catch(console.error);

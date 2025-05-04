@@ -9,7 +9,8 @@ const tokenRoutes = require('./routes/tokenRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+// Forcer l'utilisation du port 3001 en local pour éviter les conflits
+const PORT = process.env.NODE_ENV === 'production' ? (process.env.PORT || 3000) : 3001;
 
 // Middleware
 app.use(cors());

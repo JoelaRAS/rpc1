@@ -116,6 +116,58 @@ class CryptoCompareService {
       throw error;
     }
   }
+
+  /**
+   * Récupère le prix actuel d'un token en USD (fonction simplifiée)
+   * @param {string} symbol - Symbole du token (ex: SOL)
+   * @param {string} currency - Devise (ex: USD)
+   * @returns {Promise<Object>} - Prix actuel
+   */
+  async getCurrentPrice(symbol, currency = 'USD') {
+    try {
+      const response = await axios.get(`${this.baseURL}/price`, {
+        params: {
+          fsym: symbol.toUpperCase(),
+          tsyms: currency,
+          api_key: this.apiKey
+        }
+      });
+      
+      return response.data;
+    } catch (error) {
+      console.error(`Erreur lors de la récupération du prix actuel de ${symbol} via CryptoCompare:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Récupère le prix d'un token à un timestamp donné
+   * @param {string} symbol - Symbole du token (ex: SOL)
+   * @param {number} timestamp - Timestamp Unix en secondes
+   * @param {string} currency - Devise (ex: USD)
+   * @returns {Promise<Object>} - Prix à l'horodatage spécifié
+   */
+  async getPriceAtTimestamp(symbol, timestamp, currency = 'USD') {
+    try {
+      // CryptoCompare utilise des timestamps en secondes
+      const timestampSeconds = Math.floor(timestamp);
+      
+      const response = await axios.get(`${this.baseURL}/pricehistorical`, {
+        params: {
+          fsym: symbol.toUpperCase(),
+          tsyms: currency,
+          ts: timestampSeconds,
+          api_key: this.apiKey
+        }
+      });
+      
+      // CryptoCompare renvoie { BTC: { USD: 12345.67 } }
+      return response.data[symbol.toUpperCase()];
+    } catch (error) {
+      console.error(`Erreur lors de la récupération du prix historique de ${symbol} à ${new Date(timestamp * 1000).toISOString()} via CryptoCompare:`, error.message);
+      throw error;
+    }
+  }
 }
 
 module.exports = new CryptoCompareService();

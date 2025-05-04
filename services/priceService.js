@@ -70,15 +70,24 @@ class PriceService {
     // 1. Essayer via Birdeye (meilleure source pour l'historique récent)
     try {
       console.log(`PriceService: Essai via Birdeye pour ${tokenInfo.symbol}`);
+      // S'assurer que le timestamp est en millisecondes pour Birdeye
       const timestampMs = timestamp * 1000; // Convertir en millisecondes
-      const oneDayBefore = timestampMs - 12 * 60 * 60 * 1000; // 12h avant
-      const oneDayAfter = timestampMs + 12 * 60 * 60 * 1000;  // 12h après
+      
+      // Définir une plage horaire plus large pour augmenter les chances de trouver des données
+      const startTime = timestampMs - (7 * 24 * 60 * 60 * 1000); // 7 jours avant
+      const endTime = timestampMs + (24 * 60 * 60 * 1000);      // 1 jour après
+      
+      // Vérifier que ces timestamps sont valides (pas dans le futur)
+      const now = Date.now();
+      const validEndTime = Math.min(endTime, now);
+      
+      console.log(`PriceService: Recherche de prix entre ${new Date(startTime).toISOString()} et ${new Date(validEndTime).toISOString()}`);
       
       const response = await birdeyeService.getTokenPriceHistory(
         tokenAddress,
-        oneDayBefore,
-        oneDayAfter,
-        '15m' // Résolution de 15 minutes
+        startTime,
+        validEndTime,
+        '1D' // Résolution quotidienne pour avoir plus de chances d'avoir des données
       );
       
       if (response?.data?.length > 0) {
@@ -102,6 +111,9 @@ class PriceService {
           confidence: minDiff < 60 * 60 * 1000 ? 'high' : 'medium' // Confiance élevée si < 1h de différence
         };
         source = 'birdeye';
+        console.log(`PriceService: Prix trouvé via Birdeye: ${priceData.price} USD`);
+      } else {
+        console.log(`PriceService: Aucun prix trouvé via Birdeye pour ${tokenAddress}`);
       }
     } catch (error) {
       console.warn(`PriceService: Erreur Birdeye pour ${tokenAddress}: ${error.message}`);
