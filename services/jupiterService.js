@@ -180,6 +180,15 @@ class JupiterService {
   }
   
   /**
+   * Récupère des informations sur un token (alias pour getEnrichedTokenInfo)
+   * @param {string} mintAddress - Adresse du token
+   * @returns {Promise<Object>} - Informations sur le token
+   */
+  async getTokenInfo(mintAddress) {
+    return this.getEnrichedTokenInfo(mintAddress, 0);
+  }
+  
+  /**
    * Récupère des informations enrichies sur un token
    * @param {string} mintAddress - Adresse du token
    * @param {string|number} amount - Montant (en format brut)

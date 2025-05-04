@@ -8,6 +8,30 @@ class AlchemyService {
   }
 
   /**
+   * Récupère les détails d'une transaction spécifique par sa signature
+   * @param {string} signature - La signature de la transaction
+   * @returns {Promise<Object|null>} - La transaction complète ou null si non trouvée
+   */
+  async getTransaction(signature) {
+    try {
+      const response = await axios.post(this.baseURL, {
+        jsonrpc: "2.0",
+        id: "tx-details",
+        method: "getTransaction",
+        params: [
+          signature,
+          { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }
+        ]
+      });
+      
+      return response.data.result;
+    } catch (error) {
+      console.error(`Erreur lors de la récupération de la transaction ${signature}:`, error.message);
+      return null;
+    }
+  }
+
+  /**
    * Récupère les soldes SOL et SPL Token d'un portefeuille
    * @param {string} walletAddress - L'adresse du portefeuille
    * @returns {Promise<Object>} - Les soldes du portefeuille
