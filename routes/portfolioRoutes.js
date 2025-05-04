@@ -412,6 +412,233 @@ router.get('/history/:walletAddress', async (req, res, next) => {
 });
 
 /**
+ * @route GET /api/portfolio/history-period/:walletAddress
+ * @description Récupère l'historique des transactions d'un portefeuille sur une période variable
+ * @access Public
+ * @param {string} period - 'day', 'week', 'month', 'custom'
+ * @param {number} days - Nombre de jours personnalisé (si period=custom)
+ * @param {string} start - Date de début au format YYYY-MM-DD (si period=custom)
+ * @param {string} end - Date de fin au format YYYY-MM-DD (si period=custom)
+ */
+router.get('/history-period/:walletAddress', async (req, res, next) => {
+  try {
+    const { walletAddress } = req.params;
+    const { period = 'month', days, start, end, limit = 100 } = req.query;
+    
+    // Calcul des timestamps de début et fin selon la période
+    const now = new Date();
+    let startTimestamp;
+    let endTimestamp = now.getTime();
+    
+    // Déterminer la période selon le paramètre
+    switch (period.toLowerCase()) {
+      case 'day':
+        startTimestamp = now.getTime() - (24 * 60 * 60 * 1000);
+        break;
+      case 'week':
+        startTimestamp = now.getTime() - (7 * 24 * 60 * 60 * 1000);
+        break;
+      case 'month':
+        startTimestamp = now.getTime() - (30 * 24 * 60 * 60 * 1000);
+        break;
+      case 'custom':
+        if (days) {
+          startTimestamp = now.getTime() - (parseInt(days) * 24 * 60 * 60 * 1000);
+        } else if (start) {
+          startTimestamp = new Date(start).getTime();
+          if (end) {
+            endTimestamp = new Date(end).getTime();
+          }
+        } else {
+          // Par défaut, 30 jours si aucune personnalisation n'est fournie
+          startTimestamp = now.getTime() - (30 * 24 * 60 * 60 * 1000);
+        }
+        break;
+      default:
+        // Par défaut, 30 jours
+        startTimestamp = now.getTime() - (30 * 24 * 60 * 60 * 1000);
+    }
+    
+    console.log(`Récupération des transactions pour ${walletAddress} du ${new Date(startTimestamp).toISOString()} au ${new Date(endTimestamp).toISOString()}`);
+    
+    // 1. RÉCUPÉRATION DES SIGNATURES DE TRANSACTIONS VIA HELIUS
+    let transactionSignatures = [];
+    try {
+      console.log(`Récupération des signatures via Helius pour ${walletAddress}`);
+      const result = await heliusService.getTransactionHistory(walletAddress, parseInt(limit));
+      // Vérification défensive que result est défini et un tableau
+      transactionSignatures = Array.isArray(result) ? result : [];
+      console.log(`${transactionSignatures.length} signatures brutes récupérées via Helius`);
+      
+      // Filtrer les transactions par période
+      transactionSignatures = transactionSignatures.filter(tx => {
+        // Blocktime est en secondes, convertir en millisecondes
+        const txTimestamp = tx.blockTime ? tx.blockTime * 1000 : 0;
+        return txTimestamp >= startTimestamp && txTimestamp <= endTimestamp;
+      });
+      
+      console.log(`${transactionSignatures.length} signatures dans la période demandée`);
+    } catch (error) {
+      console.error(`Erreur lors de la récupération des signatures: ${error.message}`);
+      // Même en cas d'erreur, continuer avec un tableau vide
+      transactionSignatures = [];
+    }
+    
+    if (!transactionSignatures || transactionSignatures.length === 0) {
+      console.log(`Aucune signature de transaction trouvée pour ${walletAddress} dans la période demandée`);
+      return res.json({
+        success: true,
+        transactions: [],
+        count: 0,
+        period: {
+          name: period,
+          startDate: new Date(startTimestamp).toISOString(),
+          endDate: new Date(endTimestamp).toISOString()
+        }
+      });
+    }
+    
+    // 2. ANALYSE DE CHAQUE TRANSACTION INDIVIDUELLEMENT (comme dans /api/transaction/:signature)
+    console.log(`Analyse détaillée des ${transactionSignatures.length} transactions`);
+    
+    // Limiter le nombre de requêtes parallèles pour éviter de surcharger les APIs
+    const MAX_CONCURRENT_REQUESTS = 5;
+    const enrichedTransactions = [];
+    
+    // Traiter les transactions par lots
+    for (let i = 0; i < transactionSignatures.length; i += MAX_CONCURRENT_REQUESTS) {
+      const batch = transactionSignatures.slice(i, i + MAX_CONCURRENT_REQUESTS);
+      console.log(`Traitement du lot ${Math.floor(i/MAX_CONCURRENT_REQUESTS) + 1}/${Math.ceil(transactionSignatures.length/MAX_CONCURRENT_REQUESTS)}`);
+      
+      // Traiter chaque signature dans le lot en parallèle
+      const batchPromises = batch.map(async (sigInfo) => {
+        try {
+          // Vérifier que sigInfo et signature existent
+          if (!sigInfo) return null;
+          const signature = sigInfo.signature || sigInfo.id;
+          if (!signature) return null;
+          
+          // COPIE EXACTE DE LA LOGIQUE DE /api/transaction/:signature
+          
+          // 1. Récupération de la transaction brute via Helius
+          console.log(`Récupération de la transaction ${signature} via Helius`);
+          const heliusTransaction = await heliusService.getTransaction(signature);
+          if (!heliusTransaction) {
+            return null;
+          }
+
+          // 2. Utilisation d'Alchemy pour obtenir les détails complets (optionnel)
+          let alchemyTransactionDetails = null;
+          try {
+            alchemyTransactionDetails = await alchemyService.getTransaction(signature);
+          } catch (error) {
+            console.log(`Alchemy non disponible pour ${signature}, utilisation des données Helius uniquement`);
+          }
+          
+          // Fusion des données avec priorité à Alchemy pour les détails
+          const transaction = alchemyTransactionDetails || heliusTransaction;
+          
+          // 3. Extraction des tokens impliqués dans la transaction
+          const tokenMints = transactionAnalysis.extractTokenMintsFromTransaction(transaction);
+          
+          // 4. Récupération des informations sur les assets via Jupiter
+          const assetInfo = {};
+          for (const mint of tokenMints) {
+            try {
+              const jupiterAssetInfo = await jupiterService.getTokenInfo(mint);
+              if (jupiterAssetInfo) {
+                assetInfo[mint] = jupiterAssetInfo;
+              }
+            } catch (error) {
+              console.error(`Erreur Jupiter pour ${mint}: ${error.message}`);
+            }
+          }
+          
+          // 5. Enrichissement avec historique des prix pour chaque token
+          const priceHistory = {};
+          if (transaction.blockTime) {
+            const timestamp = transaction.blockTime;
+            
+            for (const mint of tokenMints) {
+              try {
+                const historicalPrice = await priceService.getHistoricalPrice(mint, timestamp);
+                
+                if (historicalPrice) {
+                  const tokenSymbol = assetInfo[mint]?.symbol || 'UNKNOWN';
+                  priceHistory[mint] = {
+                    mint,
+                    symbol: tokenSymbol,
+                    name: assetInfo[mint]?.name || 'Unknown Token',
+                    priceHistory: historicalPrice
+                  };
+                }
+              } catch (error) {
+                console.error(`Erreur prix pour ${mint}: ${error.message}`);
+              }
+            }
+          }
+          
+          // 6. Analyse contextuelle de la transaction
+          const analysisResult = alchemyTransactionDetails 
+            ? transactionAnalysis.analyzeAlchemyTransaction(alchemyTransactionDetails)
+            : await transactionAnalysis.analyzeTransaction(heliusTransaction);
+          
+          // 7. Préparation de la réponse finale (EXACTEMENT comme /api/transaction/:signature)
+          return {
+            signature,
+            status: transaction.meta?.err ? 'failed' : 'success',
+            blockTime: transaction.blockTime 
+              ? new Date(transaction.blockTime * 1000).toISOString() 
+              : null,
+            fee: transaction.meta?.fee ? transaction.meta.fee / 1e9 : null,
+            analysis: analysisResult,
+            priceHistory,
+            assetInfo,
+            transaction: transaction // Inclure la transaction complète
+          };
+          
+        } catch (error) {
+          console.error(`Erreur lors de l'analyse de la transaction: ${error.message}`);
+          return null;
+        }
+      });
+      
+      // Attendre que toutes les transactions du lot soient traitées
+      const batchResults = await Promise.all(batchPromises);
+      
+      // Ajouter les résultats valides à la liste
+      enrichedTransactions.push(...batchResults.filter(tx => tx !== null));
+      console.log(`Lot traité: ${batchResults.filter(tx => tx !== null).length}/${batch.length} transactions analysées avec succès`);
+    }
+    
+    console.log(`Analyse terminée: ${enrichedTransactions.length}/${transactionSignatures.length} transactions analysées`);
+    
+    // Trier les transactions par date (plus récentes en premier)
+    enrichedTransactions.sort((a, b) => {
+      if (!a.blockTime) return 1;
+      if (!b.blockTime) return -1;
+      return new Date(b.blockTime) - new Date(a.blockTime);
+    });
+    
+    // Envoyer la réponse avec les transactions enrichies
+    res.json({
+      success: true,
+      transactions: enrichedTransactions,
+      count: enrichedTransactions.length,
+      period: {
+        name: period,
+        startDate: new Date(startTimestamp).toISOString(),
+        endDate: new Date(endTimestamp).toISOString()
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erreur générale dans la route history-period:', error);
+    next(error);
+  }
+});
+
+/**
  * @route GET /api/portfolio/analysis/:walletAddress
  * @description Récupère une analyse complète du portefeuille
  * @access Public
