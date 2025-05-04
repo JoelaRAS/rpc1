@@ -105,78 +105,177 @@ async function enrichTransactionWithPriceHistory(transaction) {
     });
   }
   
-  // Récupérer l'historique des prix pour chaque token en parallèle (pour optimiser le temps de réponse)
+  // Si aucun token n'est impliqué, retourner la transaction telle quelle
+  if (tokenMints.size === 0) {
+    console.warn('Aucun token trouvé dans la transaction');
+    return enrichedTx;
+  }
+  
+  console.log(`${tokenMints.size} tokens trouvés dans la transaction`);
+  
+  // Récupérer l'historique des prix pour chaque token en parallèle
   const priceHistoryPromises = Array.from(tokenMints).map(async (mint) => {
-    // Étape 1: Tenter de récupérer les métadonnées via Birdeye
+    // Étape 1: Tenter d'abord via Birdeye (plus rapide)
     let tokenMetadata = null;
     let tokenInfo = null;
-    let coingeckoId = null;
+    let priceHistory = null;
     
     try {
       const response = await birdeyeService.getTokenMetadata(mint);
       tokenMetadata = response?.data || null;
-      coingeckoId = tokenMetadata?.coingeckoId;
+      
+      if (tokenMetadata) {
+        // Étape 1.1: Si nous avons les métadonnées, essayer d'obtenir l'historique des prix via Birdeye
+        try {
+          // La date de la transaction timestamp est en secondes
+          const timestamp = transaction.blockTime * 1000; // Convertir en millisecondes
+          const oneDayBefore = timestamp - 24 * 60 * 60 * 1000;
+          const oneDayAfter = timestamp + 24 * 60 * 60 * 1000;
+          
+          // Récupérer l'historique des prix via Birdeye
+          const priceHistoryResponse = await birdeyeService.getTokenPriceHistory(
+            mint,
+            oneDayBefore,
+            oneDayAfter,
+            '15m' // Résolution de 15 minutes pour une meilleure précision
+          );
+          
+          if (priceHistoryResponse && priceHistoryResponse.data && priceHistoryResponse.data.length > 0) {
+            // Trouver le prix le plus proche de la date de la transaction
+            const prices = priceHistoryResponse.data;
+            let closestPrice = prices[0];
+            let minDiff = Math.abs(timestamp - prices[0].unixTime);
+            
+            for (let i = 1; i < prices.length; i++) {
+              const diff = Math.abs(timestamp - prices[i].unixTime);
+              if (diff < minDiff) {
+                minDiff = diff;
+                closestPrice = prices[i];
+              }
+            }
+            
+            priceHistory = {
+              source: 'birdeye',
+              price: closestPrice.value,
+              timestamp: closestPrice.unixTime,
+              timeDifference: `${Math.round(minDiff / 1000 / 60)} minutes`
+            };
+          }
+        } catch (error) {
+          console.warn(`Impossible de récupérer l'historique des prix via Birdeye pour ${mint}:`, error.message);
+        }
+      }
     } catch (error) {
       console.warn(`Impossible de récupérer les métadonnées via Birdeye pour ${mint}:`, error.message);
     }
     
-    // Étape 2: Si on n'a pas d'ID CoinGecko, essayer de le trouver via CoinGecko search (pour les tokens populaires)
-    if (!coingeckoId && tokenMetadata?.symbol) {
+    // Étape 2: Si pas d'historique via Birdeye, essayer via CoinGecko
+    if (!priceHistory && tokenMetadata?.coingeckoId) {
+      try {
+        const cgHistory = await coinGeckoService.getPriceAtTimestamp(
+          tokenMetadata.coingeckoId,
+          transaction.blockTime
+        );
+        
+        if (cgHistory && cgHistory.market_data && cgHistory.market_data.current_price) {
+          priceHistory = {
+            source: 'coingecko',
+            price: cgHistory.market_data.current_price.usd,
+            timestamp: transaction.blockTime * 1000,
+            timeDifference: '0 minutes'
+          };
+        }
+      } catch (error) {
+        console.warn(`Impossible de récupérer l'historique des prix via CoinGecko pour ${mint}:`, error.message);
+      }
+    }
+    
+    // Étape 3: Si toujours pas d'historique et que nous avons un symbole, essayer via CryptoCompare
+    if (!priceHistory && tokenMetadata?.symbol) {
+      try {
+        const symbol = tokenMetadata.symbol.toUpperCase();
+        const ccHistory = await cryptoCompareService.getPriceAtTimestamp(
+          symbol,
+          transaction.blockTime
+        );
+        
+        if (ccHistory && ccHistory.USD) {
+          priceHistory = {
+            source: 'cryptocompare',
+            price: ccHistory.USD,
+            timestamp: transaction.blockTime * 1000,
+            timeDifference: '0 minutes'
+          };
+        }
+      } catch (error) {
+        console.warn(`Impossible de récupérer l'historique des prix via CryptoCompare pour ${tokenMetadata?.symbol}:`, error.message);
+      }
+    }
+    
+    // Étape 4: Si pas de coingeckoId dans les métadonnées, essayer de le trouver
+    if (!priceHistory && !tokenMetadata?.coingeckoId && tokenMetadata?.symbol) {
       try {
         const searchResult = await coinGeckoService.searchToken(tokenMetadata.symbol);
+        
         if (searchResult && searchResult.coins && searchResult.coins.length > 0) {
-          // Prendre le premier résultat qui correspond exactement au symbole du token
+          // Prendre le premier résultat qui correspond au symbole du token
           const exactMatch = searchResult.coins.find(
             coin => coin.symbol.toLowerCase() === tokenMetadata.symbol.toLowerCase()
           );
           
           if (exactMatch) {
-            coingeckoId = exactMatch.id;
-            // Enrichir les métadonnées avec les données de CoinGecko
-            tokenInfo = await coinGeckoService.getToken(coingeckoId);
+            const cgId = exactMatch.id;
+            const cgHistory = await coinGeckoService.getPriceAtTimestamp(
+              cgId,
+              transaction.blockTime
+            );
+            
+            if (cgHistory && cgHistory.market_data && cgHistory.market_data.current_price) {
+              priceHistory = {
+                source: 'coingecko_search',
+                price: cgHistory.market_data.current_price.usd,
+                timestamp: transaction.blockTime * 1000,
+                timeDifference: '0 minutes'
+              };
+            }
           }
         }
       } catch (error) {
-        console.warn(`Erreur lors de la recherche CoinGecko pour ${tokenMetadata.symbol}:`, error.message);
-      }
-    }
-    
-    // Étape 3: Si on a un ID CoinGecko, récupérer l'historique des prix
-    let priceHistory = null;
-    if (coingeckoId) {
-      try {
-        priceHistory = await coinGeckoService.getPriceAtTimestamp(
-          coingeckoId,
-          transaction.blockTime
-        );
-      } catch (error) {
-        console.warn(`Impossible de récupérer l'historique des prix pour ${mint}:`, error.message);
+        console.warn(`Erreur lors de la recherche CoinGecko pour ${tokenMetadata?.symbol}:`, error.message);
       }
     }
     
     // Combiner toutes les informations et les retourner
     return {
       mint,
-      symbol: tokenMetadata?.symbol || tokenInfo?.symbol || 'UNKNOWN',
-      name: tokenMetadata?.name || tokenInfo?.name || 'Unknown Token',
-      logoURI: tokenMetadata?.logoURI || tokenInfo?.image?.small || null,
-      coingeckoId,
-      priceHistory,
-      // Inclure les prix actuels si disponibles (pour comparaison historique/actuel)
-      currentPrice: tokenInfo?.market_data?.current_price || null
+      symbol: tokenMetadata?.symbol || 'UNKNOWN',
+      name: tokenMetadata?.name || 'Unknown Token',
+      logoURI: tokenMetadata?.logoURI || null,
+      priceHistory: priceHistory,
+      metadata: tokenMetadata || null
     };
   });
   
-  // On attend que toutes les promesses soient résolues
-  const priceHistories = await Promise.all(priceHistoryPromises);
-  
-  // On ajoute l'historique des prix à la transaction
-  enrichedTx.priceHistory = priceHistories.reduce((acc, history) => {
-    if (history && history.mint) {
-      acc[history.mint] = history;
-    }
-    return acc;
-  }, {});
+  try {
+    // On attend que toutes les promesses soient résolues
+    const priceHistories = await Promise.all(priceHistoryPromises);
+    
+    // On ajoute l'historique des prix à la transaction
+    enrichedTx.priceHistory = {};
+    
+    priceHistories.forEach(history => {
+      if (history && history.mint) {
+        enrichedTx.priceHistory[history.mint] = history;
+        console.log(`Prix historique pour ${history.symbol} (${history.mint}): ${history.priceHistory ? 'Trouvé' : 'Non disponible'}`);
+      }
+    });
+    
+    console.log(`Historique des prix ajouté pour ${Object.keys(enrichedTx.priceHistory).length}/${tokenMints.size} tokens`);
+    
+  } catch (error) {
+    console.error('Erreur lors de la récupération des historiques de prix:', error.message);
+    // En cas d'erreur, retourner la transaction sans historique des prix
+  }
   
   return enrichedTx;
 }
