@@ -265,14 +265,39 @@ router.get('/history/:walletAddress', async (req, res, next) => {
       category
     };
     
-    // Récupération de l'historique des transactions via Alchemy (plus détaillé)
-    const transactions = await alchemyService.getEnrichedTransactions(walletAddress, options);
+    let transactions = [];
+    let errorMessage = null;
+    
+    // Essayer d'abord avec Alchemy
+    try {
+      transactions = await alchemyService.getEnrichedTransactions(walletAddress, options);
+      console.log(`Transactions récupérées avec succès via Alchemy pour ${walletAddress}`);
+    } catch (alchemyError) {
+      errorMessage = `Erreur Alchemy: ${alchemyError.message}`;
+      console.error(errorMessage);
+      
+      // En cas d'échec d'Alchemy, essayer avec Helius comme solution de secours
+      try {
+        console.log(`Tentative de récupération des transactions via Helius pour ${walletAddress}`);
+        transactions = await heliusService.getTransactionHistory(walletAddress, parseInt(limit), before);
+        console.log(`Transactions récupérées avec succès via Helius pour ${walletAddress}`);
+        
+        // Ajouter une indication de la source dans la réponse
+        res.set('X-Data-Source', 'Helius-Fallback');
+      } catch (heliusError) {
+        console.error(`Erreur Helius: ${heliusError.message}`);
+        // Propager l'erreur originale d'Alchemy si les deux services échouent
+        throw new Error(`Erreur lors de la récupération des transactions - Alchemy: ${alchemyError.message}, Helius: ${heliusError.message}`);
+      }
+    }
     
     res.json({
       success: true,
-      transactions
+      transactions,
+      dataSource: errorMessage ? 'Helius (solution de secours)' : 'Alchemy'
     });
   } catch (error) {
+    console.error('Erreur générale dans la route history:', error);
     next(error);
   }
 });
