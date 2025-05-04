@@ -256,141 +256,90 @@ router.get('/assets/:walletAddress', async (req, res, next) => {
 router.get('/history/:walletAddress', async (req, res, next) => {
   try {
     const { walletAddress } = req.params;
-    const { limit = 100, before, fromBlock, toBlock, category } = req.query;
+    const { limit = 100, before } = req.query;
     
-    // Options pour les transactions enrichies
-    const options = {
-      limit: parseInt(limit),
-      before,
-      fromBlock,
-      toBlock,
-      category
-    };
+    console.log(`Récupération de l'historique des transactions pour ${walletAddress}, limite: ${limit}`);
     
-    console.log(`Récupération des transactions pour ${walletAddress}, limite: ${limit}`);
-    
-    // Variables pour stocker les résultats
+    // 1. RÉCUPÉRATION DES SIGNATURES DE TRANSACTIONS VIA HELIUS
     let transactionSignatures = [];
-    let errorMessage = null;
-    let transactions = [];
-    
-    // Essayer d'abord avec Helius pour une meilleure fiabilité
     try {
-      console.log(`Tentative de récupération des transactions via Helius pour ${walletAddress}`);
-      // Utiliser la nouvelle méthode enrichie qui récupère automatiquement les détails
-      transactions = await heliusService.getEnrichedTransactionHistory(walletAddress, parseInt(limit), before);
-      console.log(`${transactions.length} transactions récupérées avec succès via Helius pour ${walletAddress}`);
-    } catch (heliusError) {
-      errorMessage = `Erreur Helius: ${heliusError.message}`;
-      console.error(errorMessage);
-      
-      // En cas d'échec de Helius, essayer avec Alchemy comme solution de secours
-      try {
-        console.log(`Tentative de récupération des transactions via Alchemy pour ${walletAddress}`);
-        const alchemyResponse = await alchemyService.getEnrichedTransactions(walletAddress, options);
-        console.log(`Transactions récupérées via Alchemy pour ${walletAddress}`);
-        
-        // Vérifier que nous avons bien un tableau
-        transactions = Array.isArray(alchemyResponse) ? alchemyResponse : 
-                      (alchemyResponse && Array.isArray(alchemyResponse.transactions)) ? alchemyResponse.transactions : [];
-                      
-        console.log(`${transactions.length} transactions récupérées via Alchemy`);
-        
-        // Ajouter une indication de la source dans la réponse
-        res.set('X-Data-Source', 'Alchemy-Fallback');
-      } catch (alchemyError) {
-        console.error(`Erreur Alchemy: ${alchemyError.message}`);
-        // Propager les deux erreurs
-        throw new Error(`Erreur lors de la récupération des transactions - Helius: ${heliusError.message}, Alchemy: ${alchemyError.message}`);
-      }
+      console.log(`Récupération des signatures via Helius pour ${walletAddress}`);
+      transactionSignatures = await heliusService.getTransactionHistory(walletAddress, parseInt(limit), before);
+      console.log(`${transactionSignatures.length} signatures récupérées avec succès via Helius`);
+    } catch (error) {
+      console.error(`Erreur lors de la récupération des signatures: ${error.message}`);
+      throw error;
     }
     
-    // Si nous n'avons pas de transactions, renvoyer une réponse vide
-    if (!transactions || transactions.length === 0) {
-      console.log(`Aucune transaction trouvée pour ${walletAddress}`);
+    if (!transactionSignatures || transactionSignatures.length === 0) {
+      console.log(`Aucune signature de transaction trouvée pour ${walletAddress}`);
       return res.json({
         success: true,
         transactions: [],
-        count: 0,
-        dataSource: errorMessage ? 'Alchemy (solution de secours)' : 'Helius'
+        count: 0
       });
     }
     
-    console.log(`Analyse de ${transactions.length} transactions pour ${walletAddress}`);
-    
-    // Analyser les transactions en détail
-    const enrichedTransactions = [];
+    // 2. ANALYSE DE CHAQUE TRANSACTION INDIVIDUELLEMENT (comme dans /api/transaction/:signature)
+    console.log(`Analyse détaillée des ${transactionSignatures.length} transactions`);
     
     // Limiter le nombre de requêtes parallèles pour éviter de surcharger les APIs
     const MAX_CONCURRENT_REQUESTS = 5;
+    const enrichedTransactions = [];
     
     // Traiter les transactions par lots
-    for (let i = 0; i < transactions.length; i += MAX_CONCURRENT_REQUESTS) {
-      const batch = transactions.slice(i, i + MAX_CONCURRENT_REQUESTS);
-      console.log(`Traitement du lot ${Math.floor(i/MAX_CONCURRENT_REQUESTS) + 1}/${Math.ceil(transactions.length/MAX_CONCURRENT_REQUESTS)}`);
+    for (let i = 0; i < transactionSignatures.length; i += MAX_CONCURRENT_REQUESTS) {
+      const batch = transactionSignatures.slice(i, i + MAX_CONCURRENT_REQUESTS);
+      console.log(`Traitement du lot ${Math.floor(i/MAX_CONCURRENT_REQUESTS) + 1}/${Math.ceil(transactionSignatures.length/MAX_CONCURRENT_REQUESTS)}`);
       
-      // Traiter chaque transaction dans le lot en parallèle
-      const batchPromises = batch.map(async (transaction) => {
+      // Traiter chaque signature dans le lot en parallèle
+      const batchPromises = batch.map(async (sigInfo) => {
         try {
-          const signature = transaction.signature || 
-                            transaction.hash || 
-                            (transaction.transaction && transaction.transaction.signatures && transaction.transaction.signatures[0]);
+          const signature = sigInfo.signature;
+          if (!signature) return null;
           
-          if (!signature) {
-            console.log(`Signature manquante dans la transaction`);
+          // COPIE EXACTE DE LA LOGIQUE DE /api/transaction/:signature
+          
+          // 1. Récupération de la transaction brute via Helius
+          console.log(`Récupération de la transaction ${signature} via Helius`);
+          const heliusTransaction = await heliusService.getTransaction(signature);
+          if (!heliusTransaction) {
             return null;
           }
-          
-          // Si on a déjà la transaction complète de Helius, l'utiliser directement
-          // Sinon pour Alchemy, récupérer les détails via Helius
-          let txDetails = transaction;
-          if (!transaction.transaction || !transaction.meta) {
-            try {
-              console.log(`Récupération des détails pour la transaction ${signature}`);
-              txDetails = await heliusService.getTransaction(signature);
-              
-              if (!txDetails) {
-                console.log(`Transaction ${signature} non trouvée`);
-                return null;
-              }
-              
-              // Ajouter la signature au résultat
-              txDetails.signature = signature;
-            } catch (error) {
-              console.error(`Erreur lors de la récupération des détails pour ${signature}: ${error.message}`);
-              return null;
-            }
+
+          // 2. Utilisation d'Alchemy pour obtenir les détails complets (optionnel)
+          let alchemyTransactionDetails = null;
+          try {
+            alchemyTransactionDetails = await alchemyService.getTransaction(signature);
+          } catch (error) {
+            console.log(`Alchemy non disponible pour ${signature}, utilisation des données Helius uniquement`);
           }
           
-          // Extraction des tokens impliqués dans la transaction
-          const tokenMints = transactionAnalysis.extractTokenMintsFromTransaction(txDetails);
+          // Fusion des données avec priorité à Alchemy pour les détails
+          const transaction = alchemyTransactionDetails || heliusTransaction;
           
-          // Récupération des informations sur les assets via Jupiter (limité à 10 tokens max par transaction pour performance)
+          // 3. Extraction des tokens impliqués dans la transaction
+          const tokenMints = transactionAnalysis.extractTokenMintsFromTransaction(transaction);
+          
+          // 4. Récupération des informations sur les assets via Jupiter
           const assetInfo = {};
-          let tokensCount = 0;
           for (const mint of tokenMints) {
-            if (tokensCount >= 10) break; // Limiter le nombre de tokens pour éviter de surcharger l'API
-            
             try {
               const jupiterAssetInfo = await jupiterService.getTokenInfo(mint);
               if (jupiterAssetInfo) {
                 assetInfo[mint] = jupiterAssetInfo;
-                tokensCount++;
               }
             } catch (error) {
-              console.error(`Erreur lors de la récupération des infos Jupiter pour ${mint}: ${error.message}`);
+              console.error(`Erreur Jupiter pour ${mint}: ${error.message}`);
             }
           }
           
-          // Enrichissement avec historique des prix (uniquement pour les 5 premiers tokens pour performance)
+          // 5. Enrichissement avec historique des prix pour chaque token
           const priceHistory = {};
-          if (txDetails.blockTime) {
-            const timestamp = txDetails.blockTime;
+          if (transaction.blockTime) {
+            const timestamp = transaction.blockTime;
             
-            tokensCount = 0;
             for (const mint of tokenMints) {
-              if (tokensCount >= 5) break; // Limiter le nombre de tokens pour éviter de surcharger l'API
-              
               try {
                 const historicalPrice = await priceService.getHistoricalPrice(mint, timestamp);
                 
@@ -402,31 +351,32 @@ router.get('/history/:walletAddress', async (req, res, next) => {
                     name: assetInfo[mint]?.name || 'Unknown Token',
                     priceHistory: historicalPrice
                   };
-                  tokensCount++;
                 }
               } catch (error) {
-                console.error(`Erreur lors de la récupération du prix pour ${mint}: ${error.message}`);
+                console.error(`Erreur prix pour ${mint}: ${error.message}`);
               }
             }
           }
           
-          // Analyse contextuelle de la transaction
-          const analysisResult = await transactionAnalysis.analyzeTransaction(txDetails);
+          // 6. Analyse contextuelle de la transaction
+          const analysisResult = alchemyTransactionDetails 
+            ? transactionAnalysis.analyzeAlchemyTransaction(alchemyTransactionDetails)
+            : await transactionAnalysis.analyzeTransaction(heliusTransaction);
           
-          // Préparer la transaction enrichie
-          const enrichedTransaction = {
+          // 7. Préparation de la réponse finale (EXACTEMENT comme /api/transaction/:signature)
+          return {
             signature,
-            status: txDetails.meta?.err ? 'failed' : 'success',
-            blockTime: txDetails.blockTime 
-              ? new Date(txDetails.blockTime * 1000).toISOString() 
+            status: transaction.meta?.err ? 'failed' : 'success',
+            blockTime: transaction.blockTime 
+              ? new Date(transaction.blockTime * 1000).toISOString() 
               : null,
-            fee: txDetails.meta?.fee ? txDetails.meta.fee / 1e9 : null,
+            fee: transaction.meta?.fee ? transaction.meta.fee / 1e9 : null,
             analysis: analysisResult,
             priceHistory,
-            assetInfo
+            assetInfo,
+            transaction: transaction // Inclure la transaction complète
           };
           
-          return enrichedTransaction;
         } catch (error) {
           console.error(`Erreur lors de l'analyse de la transaction: ${error.message}`);
           return null;
@@ -437,19 +387,19 @@ router.get('/history/:walletAddress', async (req, res, next) => {
       const batchResults = await Promise.all(batchPromises);
       
       // Ajouter les résultats valides à la liste
-      const validResults = batchResults.filter(tx => tx !== null);
-      enrichedTransactions.push(...validResults);
-      console.log(`Lot traité: ${validResults.length}/${batch.length} transactions analysées avec succès`);
+      enrichedTransactions.push(...batchResults.filter(tx => tx !== null));
+      console.log(`Lot traité: ${batchResults.filter(tx => tx !== null).length}/${batch.length} transactions analysées avec succès`);
     }
     
-    console.log(`Analyse terminée: ${enrichedTransactions.length}/${transactions.length} transactions analysées avec succès`);
+    console.log(`Analyse terminée: ${enrichedTransactions.length}/${transactionSignatures.length} transactions analysées`);
     
+    // Envoyer la réponse avec les transactions enrichies
     res.json({
       success: true,
       transactions: enrichedTransactions,
-      count: enrichedTransactions.length,
-      dataSource: errorMessage ? 'Alchemy (solution de secours)' : 'Helius'
+      count: enrichedTransactions.length
     });
+    
   } catch (error) {
     console.error('Erreur générale dans la route history:', error);
     next(error);
