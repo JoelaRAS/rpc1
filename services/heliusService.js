@@ -61,6 +61,51 @@ class HeliusService {
   }
 
   /**
+   * Récupère et enrichit l'historique des transactions d'un portefeuille
+   * @param {string} walletAddress - L'adresse du portefeuille
+   * @param {number} limit - Nombre de transactions à récupérer
+   * @param {string} before - Signature de transaction pour pagination (optionnel)
+   * @returns {Promise<Array>} - Liste des transactions enrichies
+   */
+  async getEnrichedTransactionHistory(walletAddress, limit = 100, before = null) {
+    try {
+      // 1. D'abord, récupérer les signatures des transactions
+      const signatures = await this.getTransactionHistory(walletAddress, limit, before);
+      console.log(`Récupéré ${signatures.length} signatures pour ${walletAddress}`);
+      
+      if (!signatures || signatures.length === 0) {
+        return [];
+      }
+      
+      // 2. Récupérer les détails de chaque transaction en parallèle
+      const transactionPromises = signatures.map(sig => 
+        this.getTransaction(sig.signature)
+          .catch(err => {
+            console.error(`Erreur pour la transaction ${sig.signature}: ${err.message}`);
+            return null;
+          })
+      );
+      
+      // 3. Attendre toutes les requêtes et filtrer les échecs
+      const transactions = await Promise.all(transactionPromises);
+      const validTransactions = transactions.filter(tx => tx !== null);
+      
+      console.log(`Récupéré les détails de ${validTransactions.length}/${signatures.length} transactions`);
+      
+      // 4. Pour chaque transaction, ajouter sa signature
+      return validTransactions.map((tx, index) => {
+        return {
+          ...tx,
+          signature: signatures[index].signature
+        };
+      });
+    } catch (error) {
+      console.error('Erreur lors de la récupération des transactions enrichies:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Récupère les détails d'une transaction
    * @param {string} signature - La signature de la transaction
    * @returns {Promise<Object>} - Détails de la transaction
