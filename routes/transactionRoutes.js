@@ -8,6 +8,7 @@ const alchemyService = require('../services/alchemyService');
 const jupiterService = require('../services/jupiterService');
 const birdeyeService = require('../services/birdeyeService');
 const coinGeckoService = require('../services/coinGeckoService');
+const priceService = require('../services/priceService'); // Nouveau service de prix
 const ResponseUtils = require('../utils/responseUtils');
 
 // Adresses des programmes courants sur Solana avec leurs noms lisibles
@@ -80,6 +81,7 @@ async function enrichTransactionWithPriceHistory(transaction) {
   
   // Si pas de blockTime, on ne peut pas récupérer l'historique des prix
   if (!transaction.blockTime) {
+    console.log('Transaction sans blockTime, impossible de récupérer l\'historique des prix');
     return enrichedTx;
   }
   
@@ -107,211 +109,42 @@ async function enrichTransactionWithPriceHistory(transaction) {
   
   // Si aucun token n'est impliqué, retourner la transaction telle quelle
   if (tokenMints.size === 0) {
-    console.warn('Aucun token trouvé dans la transaction');
+    console.log('Aucun token trouvé dans la transaction');
     return enrichedTx;
   }
   
   console.log(`${tokenMints.size} tokens trouvés dans la transaction`);
   
-  // Récupérer la liste des tokens supportés par Jupiter pour enrichir les métadonnées
-  let jupiterTokens = [];
   try {
-    jupiterTokens = await jupiterService.getSupportedTokens();
-    console.log(`${jupiterTokens.length} tokens Jupiter récupérés pour enrichissement`);
-  } catch (error) {
-    console.warn('Impossible de récupérer la liste des tokens depuis Jupiter:', error.message);
-  }
-  
-  // Map des tokens Jupiter pour une recherche rapide
-  const jupiterTokenMap = {};
-  if (jupiterTokens.length > 0) {
-    jupiterTokens.forEach(token => {
-      jupiterTokenMap[token.address] = token;
-    });
-  }
-  
-  // Récupérer l'historique des prix pour chaque token en parallèle
-  const priceHistoryPromises = Array.from(tokenMints).map(async (mint) => {
-    // Étape 1: Récupérer les métadonnées du token depuis plusieurs sources
-    let tokenMetadata = null;
-    let priceHistory = null;
+    // Utiliser le nouveau service de prix pour récupérer l'historique des prix
+    // en une seule requête optimisée pour tous les tokens
+    const tokenAddressesArray = Array.from(tokenMints);
+    const priceHistoryResults = await priceService.getHistoricalPricesForTokens(
+      tokenAddressesArray,
+      transaction.blockTime
+    );
     
-    // 1.1 D'abord essayer via Jupiter (plus complet)
-    const jupiterToken = jupiterTokenMap[mint];
-    if (jupiterToken) {
-      tokenMetadata = {
-        mint: mint,
-        symbol: jupiterToken.symbol,
-        name: jupiterToken.name,
-        decimals: jupiterToken.decimals,
-        logoURI: jupiterToken.logoURI,
-        source: 'jupiter'
-      };
-    }
+    // Calculer le taux de réussite pour le logging
+    const successCount = Object.keys(priceHistoryResults).length;
+    console.log(`Historique des prix récupéré pour ${successCount}/${tokenMints.size} tokens`);
     
-    // 1.2 Si pas trouvé dans Jupiter, essayer via Birdeye
-    if (!tokenMetadata) {
-      try {
-        const response = await birdeyeService.getTokenMetadata(mint);
-        if (response?.data) {
-          tokenMetadata = {
-            ...response.data,
-            source: 'birdeye'
-          };
-        }
-      } catch (error) {
-        console.warn(`Impossible de récupérer les métadonnées via Birdeye pour ${mint}:`, error.message);
+    // Enrichir la transaction avec les données d'historique des prix
+    enrichedTx.priceHistory = priceHistoryResults;
+    
+    // Logging détaillé pour le débogage
+    for (const mint of tokenMints) {
+      const history = priceHistoryResults[mint];
+      if (history) {
+        console.log(`Token ${history.symbol || mint}: Prix historique trouvé - ${history.price} USD (source: ${history.source})`);
+      } else {
+        console.log(`Token ${mint}: Aucun prix historique trouvé`);
       }
     }
-    
-    // Si on a des métadonnées, essayer de récupérer l'historique des prix
-    if (tokenMetadata) {
-      // 2.1 Essayer d'abord via Birdeye qui a le meilleur historique de prix
-      try {
-        // La date de la transaction timestamp est en secondes
-        const timestamp = transaction.blockTime * 1000; // Convertir en millisecondes
-        const oneDayBefore = timestamp - 24 * 60 * 60 * 1000;
-        const oneDayAfter = timestamp + 24 * 60 * 60 * 1000;
-        
-        // Récupérer l'historique des prix via Birdeye
-        const priceHistoryResponse = await birdeyeService.getTokenPriceHistory(
-          mint,
-          oneDayBefore,
-          oneDayAfter,
-          '15m' // Résolution de 15 minutes pour une meilleure précision
-        );
-        
-        if (priceHistoryResponse?.data?.length > 0) {
-          // Trouver le prix le plus proche de la date de la transaction
-          const prices = priceHistoryResponse.data;
-          let closestPrice = prices[0];
-          let minDiff = Math.abs(timestamp - prices[0].unixTime);
-          
-          for (let i = 1; i < prices.length; i++) {
-            const diff = Math.abs(timestamp - prices[i].unixTime);
-            if (diff < minDiff) {
-              minDiff = diff;
-              closestPrice = prices[i];
-            }
-          }
-          
-          priceHistory = {
-            source: 'birdeye',
-            price: closestPrice.value,
-            timestamp: closestPrice.unixTime,
-            timeDifference: `${Math.round(minDiff / 1000 / 60)} minutes`
-          };
-        }
-      } catch (error) {
-        console.warn(`Impossible de récupérer l'historique des prix via Birdeye pour ${mint}:`, error.message);
-      }
-      
-      // 2.2 Si pas d'historique via Birdeye, essayer via CoinGecko
-      if (!priceHistory && tokenMetadata.coingeckoId) {
-        try {
-          const cgHistory = await coinGeckoService.getPriceAtTimestamp(
-            tokenMetadata.coingeckoId,
-            transaction.blockTime
-          );
-          
-          if (cgHistory?.market_data?.current_price) {
-            priceHistory = {
-              source: 'coingecko',
-              price: cgHistory.market_data.current_price.usd,
-              timestamp: transaction.blockTime * 1000,
-              timeDifference: '0 minutes'
-            };
-          }
-        } catch (error) {
-          console.warn(`Impossible de récupérer l'historique des prix via CoinGecko pour ${mint}:`, error.message);
-        }
-      }
-      
-      // 2.3 Si toujours pas d'historique et que le token est un token populaire, essayer via CryptoCompare
-      if (!priceHistory && tokenMetadata.symbol) {
-        try {
-          const cryptoCompareService = require('../services/cryptoCompareService');
-          const symbol = tokenMetadata.symbol.toUpperCase();
-          
-          // Seulement tenter pour les tokens populaires (SOL, USDC, USDT, etc.)
-          const popularTokens = ['SOL', 'USDC', 'USDT', 'BTC', 'ETH', 'WBTC', 'BONK', 'JTO', 'RAY', 'ORCA', 'JUP'];
-          
-          if (popularTokens.includes(symbol)) {
-            const ccHistory = await cryptoCompareService.getPriceAtTimestamp(
-              symbol,
-              transaction.blockTime
-            );
-            
-            if (ccHistory && ccHistory.USD) {
-              priceHistory = {
-                source: 'cryptocompare',
-                price: ccHistory.USD,
-                timestamp: transaction.blockTime * 1000,
-                timeDifference: '0 minutes'
-              };
-            }
-          }
-        } catch (error) {
-          console.warn(`Impossible de récupérer l'historique des prix via CryptoCompare pour ${tokenMetadata.symbol}:`, error.message);
-        }
-      }
-      
-      // 2.4 Dernier recours: essayer de récupérer le prix actuel via Jupiter
-      if (!priceHistory && tokenMetadata.symbol) {
-        try {
-          // Utiliser SOL comme référence pour le prix
-          const solMint = 'So11111111111111111111111111111111111111112'; // wSOL mint address
-          
-          // Seul cas où nous utilisons Jupiter pour récupérer un prix (pas pour swap)
-          const jupiterPrice = await jupiterService.getPrice(mint, solMint);
-          
-          if (jupiterPrice && jupiterPrice.price) {
-            priceHistory = {
-              source: 'jupiter_current',
-              price: jupiterPrice.price, // Note: ce sera relatif à SOL, pas en USD
-              priceCurrency: 'SOL',
-              timestamp: Date.now(),
-              timeDifference: 'current', // Indiquer que c'est le prix actuel, pas historique
-              warning: 'Prix actuel, pas historique'
-            };
-          }
-        } catch (error) {
-          console.warn(`Impossible de récupérer le prix actuel via Jupiter pour ${mint}:`, error.message);
-        }
-      }
-    }
-    
-    // Combiner toutes les informations et les retourner
-    return {
-      mint,
-      symbol: tokenMetadata?.symbol || 'UNKNOWN',
-      name: tokenMetadata?.name || 'Unknown Token',
-      logoURI: tokenMetadata?.logoURI || null,
-      decimals: tokenMetadata?.decimals || 0,
-      priceHistory,
-      metadata: tokenMetadata || null
-    };
-  });
-  
-  try {
-    // On attend que toutes les promesses soient résolues
-    const priceHistories = await Promise.all(priceHistoryPromises);
-    
-    // On ajoute l'historique des prix à la transaction
-    enrichedTx.priceHistory = {};
-    
-    priceHistories.forEach(history => {
-      if (history && history.mint) {
-        enrichedTx.priceHistory[history.mint] = history;
-        console.log(`Prix historique pour ${history.symbol} (${history.mint}): ${history.priceHistory ? 'Trouvé (source: ' + history.priceHistory.source + ')' : 'Non disponible'}`);
-      }
-    });
-    
-    console.log(`Historique des prix ajouté pour ${Object.keys(enrichedTx.priceHistory).length}/${tokenMints.size} tokens`);
     
   } catch (error) {
     console.error('Erreur lors de la récupération des historiques de prix:', error.message);
-    // En cas d'erreur, retourner la transaction sans historique des prix
+    // En cas d'erreur, retourner la transaction sans historique des prix complet
+    enrichedTx.priceHistoryError = { message: error.message };
   }
   
   return enrichedTx;
