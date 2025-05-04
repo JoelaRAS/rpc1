@@ -131,16 +131,19 @@ router.get('/:signature', async (req, res, next) => {
       assetInfo
     };
     
-    res.json(ResponseUtils.success({
-      signature,
-      blockTime: transaction.blockTime 
-        ? new Date(transaction.blockTime * 1000).toISOString() 
-        : null,
-      status: transaction.meta?.err ? 'failed' : 'success',
-      fee: transaction.meta?.fee ? transaction.meta.fee / 1e9 : null,
-      transaction: enrichedTransaction,
-      analysis: analysisResult
-    }));
+    // Structure de la réponse selon le format attendu dans test-transaction.js
+    res.json({
+      data: {
+        signature,
+        status: transaction.meta?.err ? 'failed' : 'success',
+        blockTime: transaction.blockTime 
+          ? new Date(transaction.blockTime * 1000).toISOString() 
+          : null,
+        fee: transaction.meta?.fee ? transaction.meta.fee / 1e9 : null,
+        analysis: analysisResult,
+        transaction: enrichedTransaction
+      }
+    });
   } catch (error) {
     console.error('Erreur lors de l\'analyse de la transaction:', error);
     next(error);

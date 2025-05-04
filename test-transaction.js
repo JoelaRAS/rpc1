@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 // Configuration
-const BASE_URL = 'http://localhost:3001/api';
+const BASE_URL = 'https://rpc1-taupe.vercel.app/api';
 const LOG_FILE = path.join(__dirname, 'test-transaction-results.log');
 
 // Transaction connue pour contenir des tokens (swap Jupiter)
