@@ -51,30 +51,52 @@ class BirdeyeService {
    * @returns {Promise<Object>} - Données historiques de prix
    */
   async getTokenPriceHistory(tokenAddress, fromTimestamp, toTimestamp, resolution = '1H') {
-    try {
-      const response = await axios.get(`${this.baseURL}/defi/history_price`, {
-        params: {
-          address: tokenAddress,
-          type: 'token',
-          time_from: fromTimestamp,
-          time_to: toTimestamp,
-          resolution
-        },
-        headers: {
-          'X-API-KEY': this.apiKey
+    // Nombre maximum de tentatives
+    const maxRetries = 3;
+    let retries = 0;
+    let lastError = null;
+
+    while (retries < maxRetries) {
+      try {
+        const response = await axios.get(`${this.baseURL}/defi/history_price`, {
+          params: {
+            address: tokenAddress,
+            type: 'token',
+            time_from: fromTimestamp,
+            time_to: toTimestamp,
+            resolution
+          },
+          headers: {
+            'X-API-KEY': this.apiKey
+          },
+          timeout: 3000 // Timeout réduit à 3 secondes
+        });
+        
+        if (response.data && response.data.data && response.data.data.length === 0) {
+          // Si Birdeye ne renvoie pas de données, essayer avec CoinGecko ou CryptoCompare
+          return await this.getFallbackPriceHistory(tokenAddress, fromTimestamp, toTimestamp);
         }
-      });
-      
-      if (response.data && response.data.data && response.data.data.length === 0) {
-        // Si Birdeye ne renvoie pas de données, essayer avec CoinGecko ou CryptoCompare
-        return await this.getFallbackPriceHistory(tokenAddress, fromTimestamp, toTimestamp);
+        
+        return response.data;
+      } catch (error) {
+        lastError = error;
+        retries++;
+
+        // Si c'est la dernière tentative ou si ce n'est pas une erreur de réseau/timeout/serveur, on arrête les tentatives
+        if (retries >= maxRetries || 
+            (error.response && error.response.status < 500 && error.response.status !== 429)) {
+          break;
+        }
+
+        // Attente exponentielle entre les tentatives
+        const delay = 300 * Math.pow(2, retries - 1);
+        console.log(`Tentative ${retries}/${maxRetries} pour récupérer l'historique de prix de ${tokenAddress}. Nouvel essai dans ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
-      
-      return response.data;
-    } catch (error) {
-      console.error('Erreur lors de la récupération de l\'historique des prix via Birdeye:', error);
-      return await this.getFallbackPriceHistory(tokenAddress, fromTimestamp, toTimestamp);
     }
+    
+    console.error('Erreur lors de la récupération de l\'historique des prix via Birdeye après plusieurs tentatives:', lastError?.message);
+    return await this.getFallbackPriceHistory(tokenAddress, fromTimestamp, toTimestamp);
   }
 
   /**
@@ -128,30 +150,51 @@ class BirdeyeService {
    * @returns {Promise<Object>} - Données de prix actuelles
    */
   async getTokenPrice(tokenAddress) {
-    try {
-      // Essayer d'abord avec Birdeye
-      const response = await axios.get(`${this.baseURL}/defi/price`, {
-        params: {
-          address: tokenAddress
-        },
-        headers: {
-          'X-API-KEY': this.apiKey
-        },
-        timeout: 5000 // 5 secondes de timeout
-      });
-      
-      // Si Birdeye renvoie un prix valide
-      if (response.data && response.data.data && response.data.data.value > 0) {
-        return response.data;
+    // Nombre maximum de tentatives
+    const maxRetries = 3;
+    let retries = 0;
+    let lastError = null;
+
+    while (retries < maxRetries) {
+      try {
+        // Essayer d'abord avec Birdeye
+        const response = await axios.get(`${this.baseURL}/defi/price`, {
+          params: {
+            address: tokenAddress
+          },
+          headers: {
+            'X-API-KEY': this.apiKey
+          },
+          timeout: 3000 // 3 secondes de timeout
+        });
+        
+        // Si Birdeye renvoie un prix valide
+        if (response.data && response.data.data && response.data.data.value > 0) {
+          return response.data;
+        }
+        
+        // Sinon, essayer avec les services de repli
+        return await this.getFallbackPrice(tokenAddress);
+      } catch (error) {
+        lastError = error;
+        retries++;
+
+        // Si c'est la dernière tentative ou si ce n'est pas une erreur de réseau/timeout/serveur, on arrête les tentatives
+        if (retries >= maxRetries || 
+            (error.response && error.response.status < 500 && error.response.status !== 429)) {
+          break;
+        }
+
+        // Attente exponentielle entre les tentatives
+        const delay = 300 * Math.pow(2, retries - 1);
+        console.log(`Tentative ${retries}/${maxRetries} pour récupérer le prix de ${tokenAddress}. Nouvel essai dans ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
-      
-      // Sinon, essayer avec les services de repli
-      return await this.getFallbackPrice(tokenAddress);
-    } catch (error) {
-      console.error('Erreur lors de la récupération du prix via Birdeye:', error.message);
-      // En cas d'erreur, essayer avec d'autres services
-      return await this.getFallbackPrice(tokenAddress);
     }
+    
+    console.error('Erreur lors de la récupération du prix via Birdeye après plusieurs tentatives:', lastError?.message);
+    // En cas d'erreur après plusieurs tentatives, essayer avec d'autres services
+    return await this.getFallbackPrice(tokenAddress);
   }
   
   /**
@@ -353,34 +396,56 @@ class BirdeyeService {
    * @returns {Promise<Object>} - Métadonnées du token
    */
   async getTokenMetadata(tokenAddress) {
-    try {
-      const response = await axios.get(`${this.baseURL}/token/meta`, {
-        params: {
-          address: tokenAddress
-        },
-        headers: {
-          'X-API-KEY': this.apiKey
+    // Nombre maximum de tentatives
+    const maxRetries = 3;
+    let retries = 0;
+    let lastError = null;
+
+    while (retries < maxRetries) {
+      try {
+        const response = await axios.get(`${this.baseURL}/token/meta`, {
+          params: {
+            address: tokenAddress
+          },
+          headers: {
+            'X-API-KEY': this.apiKey
+          },
+          timeout: 3000 // Timeout réduit à 3 secondes
+        });
+        
+        return response.data;
+      } catch (error) {
+        lastError = error;
+        retries++;
+
+        // Si c'est la dernière tentative ou si ce n'est pas une erreur de réseau/timeout/serveur, on arrête les tentatives
+        if (retries >= maxRetries || 
+            (error.response && error.response.status < 500 && error.response.status !== 429)) {
+          break;
         }
-      });
-      
-      return response.data;
-    } catch (error) {
-      console.error('Erreur lors de la récupération des métadonnées via Birdeye:', error);
-      
-      // Essayer de récupérer les infos via Jupiter si Birdeye échoue
-      await this._initSupportedTokens();
-      const token = this.supportedTokens.get(tokenAddress);
-      
-      // Retourner un objet avec des informations de Jupiter ou des valeurs par défaut
-      return { 
-        success: token ? true : false, 
-        data: { 
-          address: tokenAddress,
-          symbol: token ? token.symbol : "UNKNOWN",
-          name: token ? token.name : "Unknown Token" 
-        } 
-      };
+
+        // Attente exponentielle entre les tentatives (300ms, 600ms, 1200ms...)
+        const delay = 300 * Math.pow(2, retries - 1);
+        console.log(`Tentative ${retries}/${maxRetries} pour récupérer les métadonnées de ${tokenAddress}. Nouvel essai dans ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
+    
+    console.error('Erreur lors de la récupération des métadonnées via Birdeye après plusieurs tentatives:', lastError);
+    
+    // Essayer de récupérer les infos via Jupiter si Birdeye échoue
+    await this._initSupportedTokens();
+    const token = this.supportedTokens.get(tokenAddress);
+    
+    // Retourner un objet avec des informations de Jupiter ou des valeurs par défaut
+    return { 
+      success: token ? true : false, 
+      data: { 
+        address: tokenAddress,
+        symbol: token ? token.symbol : "UNKNOWN",
+        name: token ? token.name : "Unknown Token" 
+      } 
+    };
   }
 
   /**
@@ -389,28 +454,51 @@ class BirdeyeService {
    * @returns {Promise<Object>} - Statistiques de liquidité
    */
   async getTokenLiquidityStats(tokenAddress) {
-    try {
-      const response = await axios.get(`${this.baseURL}/defi/liquidity`, {
-        params: {
-          address: tokenAddress
-        },
-        headers: {
-          'X-API-KEY': this.apiKey
+    // Nombre maximum de tentatives
+    const maxRetries = 3;
+    let retries = 0;
+    let lastError = null;
+
+    while (retries < maxRetries) {
+      try {
+        const response = await axios.get(`${this.baseURL}/defi/liquidity`, {
+          params: {
+            address: tokenAddress
+          },
+          headers: {
+            'X-API-KEY': this.apiKey
+          },
+          timeout: 3000 // Timeout réduit à 3 secondes
+        });
+        
+        return response.data;
+      } catch (error) {
+        lastError = error;
+        retries++;
+
+        // Si c'est la dernière tentative ou si ce n'est pas une erreur de réseau/timeout/serveur, on arrête les tentatives
+        if (retries >= maxRetries || 
+            (error.response && error.response.status < 500 && error.response.status !== 429)) {
+          break;
         }
-      });
-      
-      return response.data;
-    } catch (error) {
-      console.error('Erreur lors de la récupération des statistiques de liquidité via Birdeye:', error);
-      // Retourner un objet avec des valeurs par défaut au lieu de propager l'erreur
-      return { 
-        success: false, 
-        data: { 
-          liquidity: 0,
-          volume24h: 0
-        } 
-      };
+
+        // Attente exponentielle entre les tentatives
+        const delay = 300 * Math.pow(2, retries - 1);
+        console.log(`Tentative ${retries}/${maxRetries} pour récupérer les stats de liquidité de ${tokenAddress}. Nouvel essai dans ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
+    
+    console.error('Erreur lors de la récupération des statistiques de liquidité via Birdeye après plusieurs tentatives:', lastError?.message);
+    
+    // Retourner un objet avec des valeurs par défaut au lieu de propager l'erreur
+    return { 
+      success: false, 
+      data: { 
+        liquidity: 0,
+        volume24h: 0
+      } 
+    };
   }
 
   /**
@@ -423,43 +511,66 @@ class BirdeyeService {
       return {};
     }
     
-    try {
-      const response = await axios.get(`${this.baseURL}/multi_price`, {
-        params: {
-          list_address: tokenAddresses.join(',')
-        },
-        headers: {
-          'X-API-KEY': this.apiKey
-        }
-      });
-      
-      // Si certains tokens sont manquants ou ont des prix à zéro, utiliser les fallbacks
-      const result = response.data || {};
-      
-      // Pour chaque token qui manque ou a un prix à zéro, essayer de récupérer le prix avec les services alternatifs
-      const promises = tokenAddresses.map(async address => {
-        if (!result[address] || result[address].value === 0) {
-          const fallbackData = await this.getFallbackPrice(address);
-          if (fallbackData && fallbackData.success) {
-            result[address] = fallbackData.data;
+    // Nombre maximum de tentatives
+    const maxRetries = 3;
+    let retries = 0;
+    let lastError = null;
+
+    while (retries < maxRetries) {
+      try {
+        const response = await axios.get(`${this.baseURL}/multi_price`, {
+          params: {
+            list_address: tokenAddresses.join(',')
+          },
+          headers: {
+            'X-API-KEY': this.apiKey
+          },
+          timeout: 3000 // Timeout réduit à 3 secondes
+        });
+        
+        // Si certains tokens sont manquants ou ont des prix à zéro, utiliser les fallbacks
+        const result = response.data || {};
+        
+        // Pour chaque token qui manque ou a un prix à zéro, essayer de récupérer le prix avec les services alternatifs
+        const promises = tokenAddresses.map(async address => {
+          if (!result[address] || result[address].value === 0) {
+            const fallbackData = await this.getFallbackPrice(address);
+            if (fallbackData && fallbackData.success) {
+              result[address] = fallbackData.data;
+            }
           }
+        });
+        
+        await Promise.all(promises);
+        return result;
+      } catch (error) {
+        lastError = error;
+        retries++;
+
+        // Si c'est la dernière tentative ou si ce n'est pas une erreur de réseau/timeout/serveur, on arrête les tentatives
+        if (retries >= maxRetries || 
+            (error.response && error.response.status < 500 && error.response.status !== 429)) {
+          break;
         }
-      });
-      
-      await Promise.all(promises);
-      return result;
-    } catch (error) {
-      console.error('Erreur lors de la récupération des statistiques multiples via Birdeye:', error);
-      // Récupérer les prix individuellement via les fallbacks
-      const result = {};
-      const promises = tokenAddresses.map(async address => {
-        const priceData = await this.getFallbackPrice(address);
-        result[address] = priceData.data;
-      });
-      
-      await Promise.all(promises);
-      return result;
+
+        // Attente exponentielle entre les tentatives
+        const delay = 300 * Math.pow(2, retries - 1);
+        console.log(`Tentative ${retries}/${maxRetries} pour récupérer les statistiques multiples. Nouvel essai dans ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
+    
+    console.error('Erreur lors de la récupération des statistiques multiples via Birdeye après plusieurs tentatives:', lastError?.message);
+    
+    // Récupérer les prix individuellement via les fallbacks
+    const result = {};
+    const promises = tokenAddresses.map(async address => {
+      const priceData = await this.getFallbackPrice(address);
+      result[address] = priceData.data;
+    });
+    
+    await Promise.all(promises);
+    return result;
   }
 }
 
