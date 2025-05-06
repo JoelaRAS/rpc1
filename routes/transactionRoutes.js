@@ -151,6 +151,436 @@ router.get('/:signature', async (req, res, next) => {
 });
 
 /**
+ * @route GET /api/transaction/portfolio-format/:signature
+ * @description Récupère et analyse une transaction au format compatible avec la bibliothèque Portfolio
+ * @access Public
+ */
+router.get('/portfolio-format/:signature', async (req, res, next) => {
+  try {
+    const { signature } = req.params;
+    
+    // 1. Récupération de la transaction brute (même code que pour l'endpoint /:signature)
+    console.log(`Récupération de la transaction ${signature} via Helius (format Portfolio)`);
+    const heliusTransaction = await heliusService.getTransaction(signature);
+    if (!heliusTransaction) {
+      return res.status(404).json(
+        ResponseUtils.error('Transaction non trouvée', 404)
+      );
+    }
+
+    // Fallback sur Alchemy si disponible
+    const alchemyTransactionDetails = await alchemyService.getTransaction(signature);
+    const transaction = alchemyTransactionDetails || heliusTransaction;
+    
+    // 2. Extraction des tokens impliqués (même code que pour l'endpoint /:signature)
+    const tokenMints = extractTokenMintsFromTransaction(transaction);
+    
+    // 3. Récupérer les métadonnées des tokens impliqués
+    const tokenInfo = {};
+    for (const mint of tokenMints) {
+      try {
+        const jupiterAssetInfo = await jupiterService.getTokenInfo(mint);
+        if (jupiterAssetInfo) {
+          tokenInfo[mint] = {
+            address: mint,
+            name: jupiterAssetInfo.name || 'Unknown Token',
+            symbol: jupiterAssetInfo.symbol || 'UNKNOWN',
+            decimals: jupiterAssetInfo.decimals || 0,
+            logoURI: jupiterAssetInfo.logoURI || null,
+            tags: jupiterAssetInfo.tags || []
+          };
+        }
+      } catch (error) {
+        console.error(`Erreur lors de la récupération des infos token pour ${mint}:`, error.message);
+      }
+    }
+    
+    // 4. Analyser l'activité financière de la transaction
+    const financialActivity = await reconstructFinancialActivity(transaction);
+    
+    // 5. Construire les BalanceChange selon le format Portfolio
+    const balanceChanges = [
+      // Convertir les changements de SOL en objets BalanceChange
+      ...financialActivity.solChanges.map(solChange => ({
+        address: transaction.transaction.message.accountKeys[solChange.accountIndex].pubkey,
+        preBalance: solChange.preBalance,
+        postBalance: solChange.postBalance,
+        change: solChange.change
+      })),
+      
+      // Convertir les changements de tokens en objets BalanceChange
+      ...financialActivity.tokenChanges.map(tokenChange => ({
+        address: tokenChange.mint,
+        preBalance: tokenChange.preBalance,
+        postBalance: tokenChange.postBalance,
+        change: tokenChange.change
+      }))
+    ];
+    
+    // 6. Déterminer les comptes affectés
+    const accountChanges = {
+      created: [],
+      updated: [],
+      closed: []
+    };
+    
+    // Détecter les comptes créés/fermés en analysant les instructions et changements de solde
+    transaction.transaction.message.instructions.forEach(ix => {
+      if (ix.programId === '11111111111111111111111111111111' && ix.parsed && ix.parsed.type === 'createAccount') {
+        accountChanges.created.push(ix.parsed.info.newAccount);
+      }
+      // Autres cas spécifiques pourraient être ajoutés ici
+    });
+    
+    // Un compte est considéré "mis à jour" s'il a un changement de solde significatif
+    const updatedAccounts = new Set();
+    financialActivity.solChanges.forEach(change => {
+      const accountKey = transaction.transaction.message.accountKeys[change.accountIndex].pubkey;
+      if (!accountChanges.created.includes(accountKey) && !accountChanges.closed.includes(accountKey)) {
+        updatedAccounts.add(accountKey);
+      }
+    });
+    accountChanges.updated = Array.from(updatedAccounts);
+    
+    // 7. Déterminer le service (DeFi protocol ou autre)
+    const programIds = identifyInvolvedPrograms(transaction);
+    const protocolName = identifyProtocol(programIds);
+    
+    const service = {
+      id: Array.from(programIds)[0] || 'unknown',  // Utiliser le premier programId comme identifiant
+      name: protocolName,
+      platformId: protocolName.toLowerCase().replace(/\s+/g, '-'),  // Format slugifié
+      networkId: 'solana',  // Toujours Solana dans ce contexte
+      description: `Transaction via ${protocolName}`
+    };
+    
+    // 8. Déterminer si c'est une transaction de spam
+    const isSpamTransaction = 
+      financialActivity.solChanges.every(change => Math.abs(change.change) < 0.00001) &&
+      financialActivity.tokenChanges.every(change => Math.abs(change.change) < 0.00001) &&
+      transaction.transaction.message.instructions.length > 10;
+    
+    // 9. Construire la réponse au format Portfolio.Transaction
+    const portfolioTransaction = {
+      signature,
+      owner: findUserAddress(transaction) || transaction.transaction.message.accountKeys[0].pubkey,
+      blockTime: transaction.blockTime || null,
+      service,
+      balanceChanges,
+      accountChanges,
+      isSigner: true,  // L'adresse propriétaire est toujours signataire dans ce contexte
+      tags: isSpamTransaction ? ['spam'] : undefined,
+      fees: transaction.meta?.fee ? transaction.meta.fee / 1e9 : null,
+      success: transaction.meta?.err ? false : true
+    };
+    
+    // 10. Format de réponse final qui inclut toutes les métadonnées nécessaires
+    const response = {
+      owner: portfolioTransaction.owner,
+      account: portfolioTransaction.owner,  // Même valeur que owner dans ce contexte
+      networkId: 'solana',
+      duration: 0,  // Non pertinent pour une transaction unique
+      transactions: [portfolioTransaction],
+      tokenInfo: {
+        'solana': tokenInfo
+      }
+    };
+    
+    res.json(response);
+  } catch (error) {
+    console.error('Erreur lors de l\'analyse de la transaction au format Portfolio:', error);
+    next(error);
+  }
+});
+
+/**
+ * @route GET /api/transaction/history/:address
+ * @description Récupère l'historique des transactions d'un portefeuille au format Portfolio
+ * @access Public
+ */
+router.get('/history/:address', async (req, res, next) => {
+  try {
+    const { address } = req.params;
+    const { limit = 10, before = null, startDate = null, endDate = null, useDemo = false, includePrices = 'true' } = req.query;
+    
+    // Adresse connue avec des transactions pour les démonstrations
+    const DEMO_ADDRESS = 'EWKbBvDFBbgb7M9H25JDG4jK9QxgfRvwb3Ew7Xqu3VZv';
+    
+    // Valider l'adresse
+    if (!address || address.length < 32) {
+      return res.status(400).json(
+        ResponseUtils.error('Adresse de portefeuille invalide', 400)
+      );
+    }
+
+    // Valider la limite (entre 1 et 50)
+    const parsedLimit = parseInt(limit);
+    if (isNaN(parsedLimit) || parsedLimit < 1 || parsedLimit > 50) {
+      return res.status(400).json(
+        ResponseUtils.error('La limite doit être un nombre entre 1 et 50', 400)
+      );
+    }
+
+    // Utiliser l'adresse fournie ou l'adresse de démo si demandé
+    const targetAddress = useDemo === 'true' ? DEMO_ADDRESS : address;
+    console.log(`Récupération de l'historique des transactions pour ${targetAddress} (limite: ${parsedLimit})`);
+    
+    // 1. Récupérer l'historique des transactions via Helius
+    const startTime = Date.now();
+    let transactionsHistory;
+    try {
+      transactionsHistory = await heliusService.getEnrichedTransactionHistory(targetAddress, parsedLimit, before);
+    } catch (error) {
+      console.error(`Erreur lors de la récupération des signatures pour ${targetAddress}:`, error.message);
+      return res.status(500).json(
+        ResponseUtils.error(`Erreur lors de la récupération des transactions: ${error.message}`, 500)
+      );
+    }
+    
+    const duration = Date.now() - startTime;
+    
+    if (!transactionsHistory || transactionsHistory.length === 0) {
+      // Si aucune transaction n'est trouvée et que nous n'utilisons pas déjà la démo,
+      // suggérer d'utiliser l'adresse de démonstration
+      if (targetAddress !== DEMO_ADDRESS) {
+        return res.status(404).json({
+          success: false,
+          message: `Aucune transaction trouvée pour l'adresse ${targetAddress}. Essayez avec le paramètre useDemo=true pour voir un exemple.`,
+          statusCode: 404,
+          demo: {
+            url: `/api/transaction/history/${address}?limit=${limit}&useDemo=true`,
+            message: "Utilisez ce lien pour tester avec une adresse de démo qui contient des transactions"
+          },
+          errors: null,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        return res.status(404).json(
+          ResponseUtils.error(`Aucune transaction trouvée, même pour l'adresse de démonstration. Il pourrait y avoir un problème avec l'API Helius.`, 404)
+        );
+      }
+    }
+
+    console.log(`${transactionsHistory.length} transactions récupérées en ${duration}ms`);
+    
+    // 2. Filtrer par date si nécessaire
+    let filteredTransactions = transactionsHistory;
+    
+    if (startDate) {
+      const startTimestamp = new Date(startDate).getTime() / 1000;
+      filteredTransactions = filteredTransactions.filter(tx => 
+        tx.blockTime && tx.blockTime >= startTimestamp
+      );
+    }
+    
+    if (endDate) {
+      const endTimestamp = new Date(endDate).getTime() / 1000;
+      filteredTransactions = filteredTransactions.filter(tx => 
+        tx.blockTime && tx.blockTime <= endTimestamp
+      );
+    }
+    
+    // 3. Traiter chaque transaction pour la transformer au format Portfolio
+    const portfolioTransactions = [];
+    const tokenInfoMap = {};
+    const priceHistoryMap = {};
+    
+    for (const tx of filteredTransactions) {
+      try {
+        // Extraction des tokens impliqués
+        const tokenMints = extractTokenMintsFromTransaction(tx);
+        
+        // Récupération des métadonnées des tokens si pas déjà dans le cache
+        for (const mint of tokenMints) {
+          if (!tokenInfoMap[mint]) {
+            try {
+              const jupiterAssetInfo = await jupiterService.getTokenInfo(mint);
+              if (jupiterAssetInfo) {
+                tokenInfoMap[mint] = {
+                  address: mint,
+                  name: jupiterAssetInfo.name || 'Unknown Token',
+                  symbol: jupiterAssetInfo.symbol || 'UNKNOWN',
+                  decimals: jupiterAssetInfo.decimals || 0,
+                  logoURI: jupiterAssetInfo.logoURI || null,
+                  tags: jupiterAssetInfo.tags || []
+                };
+              } else {
+                // Si Jupiter ne trouve pas le token, essayer d'obtenir des informations via Birdeye
+                const birdeyeInfo = await birdeyeService.getTokenMetadata(mint);
+                if (birdeyeInfo?.data) {
+                  tokenInfoMap[mint] = {
+                    address: mint,
+                    name: birdeyeInfo.data.name || 'Unknown Token',
+                    symbol: birdeyeInfo.data.symbol || 'UNKNOWN',
+                    decimals: birdeyeInfo.data.decimals || 0,
+                    logoURI: birdeyeInfo.data.logoURI || null,
+                    tags: []
+                  };
+                }
+              }
+            } catch (error) {
+              console.error(`Erreur lors de la récupération des infos token pour ${mint}:`, error.message);
+            }
+          }
+          
+          // Récupérer le prix historique du token au moment de la transaction si demandé
+          if (includePrices === 'true' && tx.blockTime && !priceHistoryMap[mint]) {
+            try {
+              const historicalPrice = await priceService.getHistoricalPrice(mint, tx.blockTime);
+              if (historicalPrice) {
+                priceHistoryMap[mint] = historicalPrice;
+              }
+            } catch (error) {
+              console.error(`Erreur lors de la récupération du prix historique pour ${mint}:`, error.message);
+            }
+          }
+        }
+        
+        // Analyser l'activité financière
+        const financialActivity = await reconstructFinancialActivity(tx);
+        
+        // Construire les BalanceChange selon le format Portfolio
+        const balanceChanges = [
+          // Changements de SOL
+          ...financialActivity.solChanges.map(solChange => {
+            const accountKey = tx.transaction.message.accountKeys[solChange.accountIndex].pubkey;
+            
+            // Vérifier si c'est l'adresse du propriétaire (l'adresse demandée)
+            const isOwnerAccount = accountKey === targetAddress;
+            
+            return {
+              address: accountKey,
+              preBalance: solChange.preBalance,
+              postBalance: solChange.postBalance,
+              change: solChange.change,
+              token: {
+                address: 'So11111111111111111111111111111111111111112', // Adresse du wrapped SOL
+                symbol: 'SOL',
+                name: 'Solana',
+                decimals: 9,
+                logoURI: 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png'
+              },
+              value: priceHistoryMap['So11111111111111111111111111111111111111112'] ? 
+                {
+                  amount: solChange.change,
+                  currency: 'USD',
+                  price: priceHistoryMap['So11111111111111111111111111111111111111112'].price || 0,
+                  total: priceHistoryMap['So11111111111111111111111111111111111111112'].price * solChange.change || 0
+                } : undefined,
+              isOwnerAccount
+            };
+          }),
+          
+          // Changements de tokens
+          ...financialActivity.tokenChanges.map(tokenChange => {
+            // Déterminer si ce changement concerne le propriétaire de l'adresse demandée
+            const isOwnerAccount = tokenChange.owner === targetAddress;
+            
+            return {
+              address: tokenChange.mint,
+              preBalance: tokenChange.preBalance,
+              postBalance: tokenChange.postBalance,
+              change: tokenChange.change,
+              token: tokenInfoMap[tokenChange.mint] || {
+                address: tokenChange.mint,
+                symbol: tokenChange.symbol || 'UNKNOWN',
+                name: tokenChange.name || 'Unknown Token',
+                decimals: 0
+              },
+              value: priceHistoryMap[tokenChange.mint] ? 
+                {
+                  amount: tokenChange.change,
+                  currency: 'USD',
+                  price: priceHistoryMap[tokenChange.mint].price || 0,
+                  total: priceHistoryMap[tokenChange.mint].price * tokenChange.change || 0
+                } : undefined,
+              isOwnerAccount
+            };
+          })
+        ];
+        
+        // Déterminer les comptes affectés
+        const accountChanges = {
+          created: [],
+          updated: [],
+          closed: []
+        };
+        
+        // Un compte est considéré "mis à jour" s'il a un changement de solde significatif
+        const updatedAccounts = new Set();
+        financialActivity.solChanges.forEach(change => {
+          const accountKey = tx.transaction.message.accountKeys[change.accountIndex].pubkey;
+          updatedAccounts.add(accountKey);
+        });
+        accountChanges.updated = Array.from(updatedAccounts);
+        
+        // Déterminer le service (DeFi protocol ou autre)
+        const programIds = identifyInvolvedPrograms(tx);
+        const protocolName = identifyProtocol(programIds);
+        
+        const service = {
+          id: Array.from(programIds)[0] || 'unknown',
+          name: protocolName,
+          platformId: protocolName.toLowerCase().replace(/\s+/g, '-'),
+          networkId: 'solana',
+          description: `Transaction via ${protocolName}`
+        };
+        
+        // Déterminer si c'est une transaction de spam
+        const isSpamTransaction = 
+          financialActivity.solChanges.every(change => Math.abs(change.change) < 0.00001) &&
+          financialActivity.tokenChanges.every(change => Math.abs(change.change) < 0.00001) &&
+          tx.transaction.message.instructions.length > 10;
+        
+        // Construire la transaction au format Portfolio
+        portfolioTransactions.push({
+          signature: tx.signature || tx.transaction?.signatures?.[0],
+          owner: targetAddress,
+          blockTime: tx.blockTime || null,
+          service,
+          balanceChanges,
+          accountChanges,
+          isSigner: true,
+          tags: isSpamTransaction ? ['spam'] : undefined,
+          fees: tx.meta?.fee ? tx.meta.fee / 1e9 : null,
+          success: tx.meta?.err ? false : true
+        });
+      } catch (error) {
+        console.error(`Erreur lors du traitement de la transaction ${tx.signature}:`, error);
+        // Continuer avec la prochaine transaction en cas d'erreur
+      }
+    }
+    
+    // 4. Format de réponse final avec toutes les métadonnées nécessaires
+    const response = {
+      owner: targetAddress,
+      account: targetAddress,
+      networkId: 'solana',
+      duration,
+      transactions: portfolioTransactions,
+      tokenInfo: {
+        'solana': tokenInfoMap
+      },
+      priceHistory: {
+        'solana': priceHistoryMap
+      },
+      pagination: {
+        before: filteredTransactions.length > 0 ? 
+          filteredTransactions[filteredTransactions.length - 1].signature : null,
+        limit: parsedLimit,
+        hasMore: filteredTransactions.length === parsedLimit
+      },
+      isDemo: targetAddress === DEMO_ADDRESS
+    };
+    
+    res.json(response);
+  } catch (error) {
+    console.error('Erreur lors de la récupération de l\'historique des transactions:', error);
+    next(error);
+  }
+});
+
+/**
  * Extrait les adresses des tokens impliqués dans la transaction
  * @param {Object} transaction - Transaction Solana
  * @returns {Set<string>} - Ensemble des adresses de tokens impliqués

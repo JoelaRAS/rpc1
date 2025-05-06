@@ -6,7 +6,7 @@ const jupiterService = require('./jupiterService');
 class BirdeyeService {
   constructor() {
     this.apiKey = process.env.BIRDEYE_API_KEY;
-    this.baseURL = 'https://api.birdeye.so/v1';
+    this.baseURL = 'https://public-api.birdeye.so/v1';
     this.supportedTokens = null;
     // Valeurs de prix par défaut pour les tests (à conserver pour les tests uniquement)
     this.defaultPrices = {
@@ -56,31 +56,53 @@ class BirdeyeService {
     let retries = 0;
     let lastError = null;
 
+    console.log(`BirdEye: Récupération historique de prix pour ${tokenAddress} du ${new Date(fromTimestamp).toISOString()} au ${new Date(toTimestamp).toISOString()}`);
+
+    // Conversion des timestamps en secondes si nécessaire (l'API Birdeye attend des secondes)
+    const timeFromSec = Math.floor(fromTimestamp / 1000);
+    const timeToSec = Math.floor(toTimestamp / 1000);
+
     while (retries < maxRetries) {
       try {
         const response = await axios.get(`${this.baseURL}/defi/history_price`, {
           params: {
             address: tokenAddress,
-            type: 'token',
-            time_from: fromTimestamp,
-            time_to: toTimestamp,
-            resolution
+            address_type: 'token',
+            type: resolution,
+            time_from: timeFromSec,
+            time_to: timeToSec
           },
           headers: {
-            'X-API-KEY': this.apiKey
+            'X-API-KEY': this.apiKey,
+            'x-chain': 'solana'
           },
-          timeout: 3000 // Timeout réduit à 3 secondes
+          timeout: 5000 // Timeout de 5 secondes
         });
         
-        if (response.data && response.data.data && response.data.data.length === 0) {
-          // Si Birdeye ne renvoie pas de données, essayer avec CoinGecko ou CryptoCompare
-          return await this.getFallbackPriceHistory(tokenAddress, fromTimestamp, toTimestamp);
+        if (response.status === 200) {
+          // Vérifier si la réponse contient des données
+          if (response.data && Array.isArray(response.data.data) && response.data.data.length > 0) {
+            console.log(`BirdEye: Succès - ${response.data.data.length} points de données historiques récupérés`);
+            return response.data;
+          } else {
+            console.log(`BirdEye: La requête a réussi mais aucune donnée n'a été trouvée pour ${tokenAddress}`);
+            // Si Birdeye ne renvoie pas de données, essayer avec CoinGecko ou CryptoCompare
+            break;
+          }
+        } else {
+          console.warn(`BirdEye: Réponse non 200 (${response.status}) pour historique de prix`);
+          break;
         }
-        
-        return response.data;
       } catch (error) {
         lastError = error;
         retries++;
+
+        // Obtenir des informations détaillées sur l'erreur
+        const errorDetails = error.response 
+          ? `Status: ${error.response.status}, Message: ${JSON.stringify(error.response.data || {})}`
+          : error.message;
+
+        console.warn(`BirdEye: Tentative ${retries}/${maxRetries} échouée pour l'historique de prix: ${errorDetails}`);
 
         // Si c'est la dernière tentative ou si ce n'est pas une erreur de réseau/timeout/serveur, on arrête les tentatives
         if (retries >= maxRetries || 
@@ -90,12 +112,12 @@ class BirdeyeService {
 
         // Attente exponentielle entre les tentatives
         const delay = 300 * Math.pow(2, retries - 1);
-        console.log(`Tentative ${retries}/${maxRetries} pour récupérer l'historique de prix de ${tokenAddress}. Nouvel essai dans ${delay}ms`);
+        console.log(`BirdEye: Nouvel essai dans ${delay}ms`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
     
-    console.error('Erreur lors de la récupération de l\'historique des prix via Birdeye après plusieurs tentatives:', lastError?.message);
+    console.error('BirdEye: Échec de la récupération de l\'historique des prix après plusieurs tentatives:', lastError?.message);
     return await this.getFallbackPriceHistory(tokenAddress, fromTimestamp, toTimestamp);
   }
 
@@ -571,6 +593,41 @@ class BirdeyeService {
     
     await Promise.all(promises);
     return result;
+  }
+
+  /**
+   * Récupère les informations complètes d'un token
+   * @param {string} tokenAddress - Adresse du token
+   * @returns {Promise<Object>} - Informations complètes du token
+   */
+  async getTokenInfo(tokenAddress) {
+    try {
+      // Récupération des métadonnées du token
+      const metadata = await this.getTokenMetadata(tokenAddress);
+      
+      // Récupération du prix actuel
+      const priceData = await this.getTokenPrice(tokenAddress);
+      
+      // Récupération des stats de liquidité
+      const liquidityStats = await this.getTokenLiquidityStats(tokenAddress);
+      
+      // Combiner toutes les informations
+      return {
+        success: true,
+        metadata: metadata.data || {},
+        price: priceData.data || {},
+        liquidity: liquidityStats.data || {}
+      };
+    } catch (error) {
+      console.error(`Erreur lors de la récupération des informations pour le token ${tokenAddress}:`, error);
+      // En cas d'erreur, retourner un objet minimal
+      return {
+        success: false,
+        metadata: {},
+        price: { value: 0 },
+        liquidity: { liquidity: 0, volume24h: 0 }
+      };
+    }
   }
 }
 

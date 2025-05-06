@@ -40,6 +40,28 @@ class CoinGeckoService {
   }
 
   /**
+   * Récupère le prix actuel d'un token par son ID CoinGecko
+   * @param {string} id - ID CoinGecko du token
+   * @param {string} currency - Devise (ex: usd, eur)
+   * @returns {Promise<number>} - Prix actuel du token
+   */
+  async getCurrentPrice(id, currency = 'usd') {
+    try {
+      const priceData = await this.getPrice(id, currency);
+      
+      if (priceData && priceData[id] && priceData[id][currency]) {
+        return priceData[id][currency];
+      }
+      
+      console.error(`Prix non disponible pour ${id} en ${currency}`);
+      return 0;
+    } catch (error) {
+      console.error(`Erreur lors de la récupération du prix actuel pour ${id}:`, error);
+      return 0;
+    }
+  }
+
+  /**
    * Récupère les données d'un token spécifique
    * @param {string} id - ID CoinGecko du token
    * @returns {Promise<Object>} - Données du token

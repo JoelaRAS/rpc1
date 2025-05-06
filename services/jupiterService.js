@@ -1,9 +1,17 @@
 const axios = require('axios');
+const priceService = require('./priceService');
+const solanaWebService = require('./solanaWebService');
+
+// Constantes
+const JUPITER_PROGRAM_ID = 'JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB';
+const JUPITER_API_BASE = 'https://price.jup.ag/v6';
 
 class JupiterService {
   constructor() {
     this.apiKey = process.env.JUPITER_API_KEY || null;
     this.baseURL = 'https://quote-api.jup.ag/v6';
+    this.liteApiBaseURL = 'https://lite-api.jup.ag';
+    this.limitOrderURL = 'https://jup.ag/api/limit';
   }
 
   /**
@@ -185,7 +193,37 @@ class JupiterService {
    * @returns {Promise<Object>} - Informations sur le token
    */
   async getTokenInfo(mintAddress) {
-    return this.getEnrichedTokenInfo(mintAddress, 0);
+    try {
+      // Utiliser l'API dédiée de Jupiter pour récupérer les informations du token spécifique
+      const response = await axios.get(`${this.liteApiBaseURL}/tokens/v1/token/${mintAddress}`);
+      
+      // Si la requête réussit, retourner les informations détaillées du token
+      if (response.data) {
+        return {
+          mint: mintAddress,
+          address: response.data.address,
+          symbol: response.data.symbol,
+          name: response.data.name,
+          decimals: response.data.decimals,
+          logoURI: response.data.logoURI,
+          tags: response.data.tags || [],
+          extensions: response.data.extensions || {},
+          freeze_authority: response.data.freeze_authority,
+          mint_authority: response.data.mint_authority,
+          permanent_delegate: response.data.permanent_delegate,
+          daily_volume: response.data.daily_volume,
+          created_at: response.data.created_at,
+          minted_at: response.data.minted_at
+        };
+      }
+      
+      // Fallback vers la méthode existante si l'API dédiée échoue
+      return this.getEnrichedTokenInfo(mintAddress, 0);
+    } catch (error) {
+      console.error(`Erreur lors de la récupération des informations du token ${mintAddress}:`, error.message);
+      // Fallback vers la méthode existante
+      return this.getEnrichedTokenInfo(mintAddress, 0);
+    }
   }
   
   /**
@@ -233,6 +271,82 @@ class JupiterService {
         mint: mintAddress,
         amount
       };
+    }
+  }
+
+  /**
+   * Récupère les ordres limites actifs d'un utilisateur
+   * @param {string} walletAddress - Adresse du portefeuille de l'utilisateur
+   * @returns {Promise<Array>} - Liste des ordres limites actifs
+   */
+  async getLimitOrders(walletAddress) {
+    try {
+      if (!walletAddress) {
+        throw new Error('Adresse du portefeuille requise pour récupérer les ordres limites');
+      }
+      
+      // Utiliser l'API Jupiter pour récupérer les ordres limites
+      const response = await axios.get(`${this.limitOrderURL}/orders`, {
+        params: { wallet: walletAddress },
+        headers: this.apiKey ? { 'Authorization': `Bearer ${this.apiKey}` } : {}
+      });
+      
+      if (response.data && Array.isArray(response.data.items)) {
+        return response.data.items.map(order => ({
+          address: order.id || order.orderId,
+          inputMint: order.inToken,
+          outputMint: order.outToken,
+          inputAmount: order.inAmount,
+          minOutputAmount: order.outAmount,
+          createdAt: order.createdAt,
+          expiresAt: order.expiryTime ? new Date(order.expiryTime).toISOString() : null,
+          status: order.status || 'active',
+          ownerAddress: walletAddress,
+          price: order.price ? {
+            numerator: order.price.numerator,
+            denominator: order.price.denominator,
+            value: parseFloat(order.price.numerator) / parseFloat(order.price.denominator)
+          } : null
+        }));
+      }
+      
+      return [];
+    } catch (error) {
+      console.error(`Erreur lors de la récupération des ordres limites pour ${walletAddress}:`, error);
+      // En cas d'erreur, retourner un tableau vide au lieu de propager l'erreur
+      return [];
+    }
+  }
+
+  /**
+   * Récupère les limit orders d'un utilisateur sur Jupiter
+   * @param {string} owner - Adresse du propriétaire
+   * @returns {Promise<Array>} Liste des limit orders
+   */
+  async getLimitOrdersByOwner(owner) {
+    try {
+      // Dans une implémentation réelle, on ferait appel à l'API Jupiter
+      // Pour la simplicité, on retourne un tableau vide (l'utilisateur n'a pas d'orders)
+      return [];
+    } catch (error) {
+      console.error(`[JupiterService] Erreur lors de la récupération des limit orders: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Récupère le prix d'un token sur le DEX Jupiter
+   * @param {string} mint - Adresse du token
+   * @returns {Promise<number>} Prix en USD
+   */
+  async getTokenPrice(mint) {
+    try {
+      // Utiliser le service de prix plutôt que de dupliquer la logique
+      const priceData = await priceService.getCurrentPrice(mint);
+      return priceData?.price || 0;
+    } catch (error) {
+      console.error(`[JupiterService] Erreur lors de la récupération du prix pour ${mint}: ${error.message}`);
+      return 0;
     }
   }
 }

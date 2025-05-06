@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { PublicKey } = require('@solana/web3.js');
+const priceService = require('./priceService');
 
 class AlchemyService {
   constructor() {
@@ -72,6 +73,319 @@ class AlchemyService {
       };
     } catch (error) {
       console.error('Erreur lors de la récupération des soldes avec Alchemy:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Récupère les informations sur les tokens stakés via des programmes spécifiques
+   * @param {string} walletAddress - L'adresse du portefeuille
+   * @returns {Promise<Array>} - Liste des tokens stakés
+   */
+  async getStakedTokens(walletAddress) {
+    try {
+      console.log(`AlchemyService: Récupération des tokens stakés pour ${walletAddress}`);
+      
+      // Cette méthode utilise un endpoint spécifique d'Alchemy pour les tokens stakés
+      // Attention: certains de ces endpoints peuvent ne pas être disponibles
+      
+      // 1. D'abord, on récupère les comptes de staking SOL standard
+      const stakedTokens = [];
+      
+      try {
+        const response = await axios.post(this.baseURL, {
+          jsonrpc: "2.0",
+          id: "staked-tokens",
+          method: "getStakeAccounts", // Endpoint standard pour le staking SOL
+          params: [
+            {
+              "staker": walletAddress
+            }
+          ]
+        });
+        
+        // Analyser les comptes de staking (format Solana standard)
+        const stakingAccounts = response.data.result?.value || [];
+        stakingAccounts.forEach(account => {
+          const stakeInfo = account.account.stake;
+          stakedTokens.push({
+            stakingAccount: account.pubkey,
+            amount: stakeInfo?.delegation?.stake || 0,
+            delegatedValidator: stakeInfo?.delegation?.voter || null,
+            status: stakeInfo?.delegation ? "active" : "inactive",
+            activationEpoch: stakeInfo?.delegation?.activationEpoch,
+            isNative: true, // Staking SOL natif
+            platform: "Solana Native Staking"
+          });
+        });
+      } catch (error) {
+        console.warn('Erreur lors de la récupération des comptes de staking SOL standard:', error.message);
+      }
+      
+      // 2. Ensuite, on recherche les tokens stakés dans des protocoles connus
+      const programIds = [
+        "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", // Jupiter Staking
+        "SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy", // Marinade Staking
+        "EhhTKczWMGQt46ynNeRX1WfeagwwJd7ufHvCDjRxjo5Q", // Lido Staking
+      ];
+      
+      // Pour chaque programme, on utilise getProgramAccounts pour chercher les comptes associés
+      for (const programId of programIds) {
+        let platform = "Unknown Protocol";
+        
+        // Déterminer le nom du protocole basé sur le programId
+        if (programId === "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4") {
+          platform = "Jupiter";
+        } else if (programId === "SPoo1Ku8WFXoNDMHPsrGSTSG1Y47rzgn41SLUNakuHy") {
+          platform = "Marinade Finance";
+        } else if (programId === "EhhTKczWMGQt46ynNeRX1WfeagwwJd7ufHvCDjRxjo5Q") {
+          platform = "Lido";
+        }
+        
+        try {
+          // On cherche les comptes du programme qui sont liés à l'utilisateur
+          const programResponse = await axios.post(this.baseURL, {
+            jsonrpc: "2.0",
+            id: `program-accounts-${programId}`,
+            method: "getProgramAccounts",
+            params: [
+              programId,
+              {
+                filters: [
+                  {
+                    memcmp: {
+                      offset: 8, // Offset commun pour le champ 'owner' dans plusieurs protocoles
+                      bytes: walletAddress
+                    }
+                  }
+                ],
+                encoding: "jsonParsed"
+              }
+            ]
+          });
+          
+          const accounts = programResponse.data.result || [];
+          
+          // Traiter chaque compte trouvé
+          for (const account of accounts) {
+            stakedTokens.push({
+              stakingAccount: account.pubkey,
+              programId,
+              platform,
+              // Les détails spécifiques dépendent de la structure de données de chaque protocole
+              // Dans un environnement de production, il faudrait analyser spécifiquement le contenu
+              // de chaque type de compte selon le protocole
+              isNative: false
+            });
+          }
+        } catch (error) {
+          console.warn(`Erreur lors de la recherche de comptes pour ${platform} (${programId}):`, error.message);
+        }
+      }
+      
+      // 3. Méthode spécifique pour Jupiter Staking
+      try {
+        // Il s'agit d'un appel hypothétique - Jupiter peut avoir une API distincte
+        const jupiterResponse = await axios.get(
+          `https://jup.ag/api/staking/wallets/${walletAddress}/positions`
+        ).catch(() => ({ data: { positions: [] } })); // Gestion d'erreur silencieuse si l'API n'existe pas
+        
+        const positions = jupiterResponse.data?.positions || [];
+        
+        positions.forEach(position => {
+          stakedTokens.push({
+            stakingAccount: position.address || "unknown",
+            platform: "Jupiter Staking",
+            tokenMint: position.mint,
+            amount: position.amount || 0,
+            uiAmount: position.uiAmount || 0,
+            isNative: false
+          });
+        });
+      } catch (error) {
+        // On ignore silencieusement car cet endpoint est hypothétique
+      }
+      
+      return stakedTokens;
+    } catch (error) {
+      console.error('Erreur générale lors de la récupération des tokens stakés:', error.message);
+      return [];
+    }
+  }
+  
+  /**
+   * Récupère les détails complets d'un portefeuille, incluant SOL, tokens SPL, NFTs et tokens stakés
+   * @param {string} walletAddress - L'adresse du portefeuille
+   * @returns {Promise<Object>} - Les détails complets du portefeuille
+   */
+  async getFullWalletDetails(walletAddress) {
+    try {
+      console.log(`AlchemyService: Récupération des détails complets pour ${walletAddress}`);
+      
+      // 1. Récupérer le solde SOL
+      const solResponse = await axios.post(this.baseURL, {
+        jsonrpc: "2.0",
+        id: "sol-balance",
+        method: "getBalance",
+        params: [walletAddress]
+      });
+      
+      const solBalanceLamports = solResponse.data.result?.value || 0;
+      const solBalance = solBalanceLamports / 1e9;
+      
+      // 2. Récupérer TOUS les tokens SPL avec jsonParsed pour avoir des informations complètes
+      const tokensResponse = await axios.post(this.baseURL, {
+        jsonrpc: "2.0",
+        id: "token-accounts",
+        method: "getTokenAccountsByOwner",
+        params: [
+          walletAddress,
+          {
+            programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" // SPL Token program ID
+          },
+          {
+            encoding: "jsonParsed" 
+          }
+        ]
+      });
+      
+      // 3. Extraire tous les tokens
+      const tokenAccounts = tokensResponse.data.result?.value || [];
+      const allTokenItems = tokenAccounts.map(account => {
+        const parsedInfo = account.account.data.parsed.info;
+        return {
+          tokenAccountAddress: account.pubkey,
+          mint: parsedInfo.mint,
+          owner: parsedInfo.owner,
+          state: parsedInfo.state,
+          amount: parsedInfo.tokenAmount.amount,
+          decimals: parsedInfo.tokenAmount.decimals,
+          uiAmount: parsedInfo.tokenAmount.uiAmount,
+          uiAmountString: parsedInfo.tokenAmount.uiAmountString
+        };
+      });
+      
+      // Filtrer les tokens avec un solde > 0 qui ne sont pas des NFTs
+      // Les NFTs sont généralement des tokens avec decimals=0 et amount=1
+      const tokensWithBalance = allTokenItems.filter(token => 
+        parseFloat(token.amount) > 0 && 
+        !(token.decimals === 0 && token.amount === "1")
+      );
+      
+      // Identifier les NFTs - tokens avec decimals=0 et amount=1
+      const nftItems = allTokenItems.filter(token => 
+        token.decimals === 0 && 
+        token.amount === "1"
+      );
+
+      // 4. Ajouter le SOL natif à la liste des tokens
+      const allTokens = [
+        {
+          tokenAccountAddress: walletAddress,  // Pour SOL, c'est le même que le wallet
+          mint: "So11111111111111111111111111111111111111112", // Mint conventionnel pour SOL (wSOL)
+          owner: walletAddress,
+          state: "initialized",
+          amount: solBalanceLamports.toString(),
+          decimals: 9,
+          uiAmount: solBalance,
+          uiAmountString: solBalance.toString(),
+          isNative: true
+        },
+        ...tokensWithBalance
+      ];
+      
+      // 5. Récupérer les prix actuels pour ces tokens
+      const tokenMints = allTokens.map(token => token.mint);
+      const prices = {};
+      
+      // Récupérer les prix en parallèle par lots de 5 pour éviter de surcharger les API
+      const chunkSize = 5;
+      for (let i = 0; i < tokenMints.length; i += chunkSize) {
+        const chunk = tokenMints.slice(i, i + chunkSize);
+        const pricePromises = chunk.map(mint => priceService.getCurrentPrice(mint));
+        const priceResults = await Promise.all(pricePromises);
+        
+        priceResults.forEach((price, index) => {
+          if (price) {
+            prices[chunk[index]] = price;
+          }
+        });
+      }
+      
+      // 6. Récupérer les métadonnées des tokens pour informations supplémentaires
+      const tokensMetadata = {};
+      for (let i = 0; i < tokenMints.length; i += chunkSize) {
+        const chunk = tokenMints.slice(i, i + chunkSize);
+        const metadataPromises = chunk.map(mint => priceService.getTokenInfo(mint));
+        const metadataResults = await Promise.all(metadataPromises);
+        
+        metadataResults.forEach((metadata, index) => {
+          if (metadata) {
+            tokensMetadata[chunk[index]] = metadata;
+          }
+        });
+      }
+      
+      // 7. Enrichir les tokens avec prix, valeur en dollars et métadonnées
+      const enrichedTokens = allTokens.map(token => {
+        const price = prices[token.mint] || null;
+        const metadata = tokensMetadata[token.mint] || null;
+        
+        return {
+          ...token,
+          symbol: metadata?.symbol || 'UNKNOWN',
+          name: metadata?.name || 'Unknown Token',
+          logo: metadata?.logoURI || null,
+          price: price?.price || null,
+          usdValue: price?.price ? (token.uiAmount * price.price) : null,
+          priceSource: price?.source || null,
+          isNative: token.isNative || false
+        };
+      });
+      
+      // 8. Enrichir les NFTs avec des métadonnées (nom, collection, etc.)
+      const nfts = nftItems.map(token => {
+        const metadata = tokensMetadata[token.mint] || null;
+        return {
+          ...token,
+          type: 'NFT',
+          symbol: metadata?.symbol || 'NFT',
+          name: metadata?.name || `NFT ${token.mint.slice(0, 8)}...`,
+          collection: metadata?.collection || null,
+          image: metadata?.logoURI || null
+        };
+      });
+      
+      // 9. Récupérer les tokens stakés
+      console.log("Récupération des tokens stakés...");
+      let stakedTokens = [];
+      try {
+        stakedTokens = await this.getStakedTokens(walletAddress);
+        console.log(`${stakedTokens.length} tokens stakés trouvés`);
+      } catch (error) {
+        console.warn("Erreur lors de la récupération des tokens stakés:", error.message);
+      }
+      
+      // 10. Formater la réponse finale
+      return {
+        walletAddress,
+        nativeBalance: {
+          lamports: solBalanceLamports,
+          sol: solBalance,
+          usdValue: prices["So11111111111111111111111111111111111111112"]?.price 
+            ? solBalance * prices["So11111111111111111111111111111111111111112"].price 
+            : null
+        },
+        tokens: enrichedTokens,
+        nfts,
+        stakedTokens,
+        totalUsdValue: enrichedTokens.reduce((sum, token) => sum + (token.usdValue || 0), 0),
+        tokenCount: enrichedTokens.length,
+        nftCount: nfts.length,
+        stakedTokenCount: stakedTokens.length
+      };
+    } catch (error) {
+      console.error('Erreur lors de la récupération des détails complets du portefeuille:', error);
       throw error;
     }
   }
@@ -317,6 +631,125 @@ class AlchemyService {
     } catch (error) {
       console.error('Erreur lors de la récupération des métadonnées du token:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Récupère tous les NFTs détenus par un utilisateur
+   * @param {string} walletAddress - L'adresse du portefeuille
+   * @returns {Promise<Array>} - Liste des NFTs
+   */
+  async getNFTsByOwner(walletAddress) {
+    try {
+      console.log(`AlchemyService: Récupération des NFTs pour ${walletAddress}`);
+      
+      // Utiliser l'endpoint dédié d'Alchemy pour récupérer les NFTs
+      // Cet endpoint est plus fiable que la détection basée sur getTokenAccountsByOwner
+      const response = await axios.post(this.baseURL, {
+        jsonrpc: "2.0",
+        id: "nft-by-owner",
+        method: "ankr_getNFTsByOwner",
+        params: {
+          walletAddress,
+          limit: 50,  // Augmenter cette valeur pour récupérer plus de NFTs
+          blockchain: "solana"
+        }
+      });
+
+      // Essayer d'abord avec l'endpoint ankr_getNFTsByOwner
+      if (response.data && response.data.result && response.data.result.assets) {
+        console.log(`${response.data.result.assets.length} NFTs trouvés via ankr_getNFTsByOwner`);
+        return response.data.result.assets.map(nft => ({
+          mint: nft.tokenId,
+          owner: walletAddress,
+          tokenAccount: nft.contractAddress,
+          name: nft.name || `NFT ${nft.tokenId.slice(0, 8)}...`,
+          symbol: nft.collectionName || "NFT",
+          image: nft.imageUrl || null,
+          collection: nft.collectionName || null
+        }));
+      }
+      
+      console.log("L'endpoint ankr_getNFTsByOwner n'est pas disponible, essai de méthode alternative");
+      
+      // Méthode alternative: Utiliser getTokenAccountsByOwner et filtrer pour les NFTs probables
+      // Cette approche peut avoir des faux positifs et des faux négatifs
+      const alternativeResponse = await axios.post(this.baseURL, {
+        jsonrpc: "2.0",
+        id: "nft-accounts",
+        method: "getTokenAccountsByOwner",
+        params: [
+          walletAddress,
+          {
+            programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" // SPL Token program ID
+          },
+          {
+            encoding: "jsonParsed"
+          }
+        ]
+      });
+      
+      const tokenAccounts = alternativeResponse.data.result?.value || [];
+      
+      // Filtrer pour trouver les comptes qui ressemblent à des NFTs (decimals=0, amount=1)
+      const potentialNfts = tokenAccounts
+        .filter(account => {
+          const tokenAmount = account.account.data.parsed.info.tokenAmount;
+          return tokenAmount.amount === "1" && 
+                 tokenAmount.decimals === 0 && 
+                 tokenAmount.uiAmount === 1;
+        })
+        .map(account => {
+          const info = account.account.data.parsed.info;
+          return {
+            mint: info.mint,
+            owner: info.owner,
+            tokenAccount: account.pubkey,
+            amount: 1,
+            name: `NFT ${info.mint.slice(0, 8)}...`,
+            symbol: "NFT",
+            image: null,
+            collection: null
+          };
+        });
+      
+      console.log(`${potentialNfts.length} NFTs potentiels trouvés via la méthode alternative`);
+      
+      // Essayer d'enrichir avec des métadonnées via un autre endpoint
+      if (potentialNfts.length > 0) {
+        try {
+          // Essayer d'utiliser l'endpoint de métadonnées pour chaque NFT
+          for (let i = 0; i < potentialNfts.length; i++) {
+            try {
+              const nft = potentialNfts[i];
+              const metadataResponse = await axios.post(this.baseURL, {
+                jsonrpc: "2.0",
+                id: `nft-metadata-${i}`,
+                method: "getMetadata",
+                params: [nft.mint]
+              });
+              
+              if (metadataResponse.data && metadataResponse.data.result) {
+                const metadata = metadataResponse.data.result;
+                nft.name = metadata.name || nft.name;
+                nft.symbol = metadata.symbol || nft.symbol;
+                nft.image = metadata.image || nft.image;
+                nft.collection = metadata.collection?.name || nft.collection;
+              }
+            } catch (err) {
+              // Continuer avec les autres NFTs en cas d'erreur
+              console.warn(`Impossible de récupérer les métadonnées pour NFT ${i}:`, err.message);
+            }
+          }
+        } catch (metadataError) {
+          console.warn("Erreur lors de la récupération des métadonnées de NFTs:", metadataError.message);
+        }
+      }
+      
+      return potentialNfts;
+    } catch (error) {
+      console.error('Erreur lors de la récupération des NFTs avec Alchemy:', error.message);
+      return [];
     }
   }
 }
