@@ -167,7 +167,8 @@ class PortfolioAssetsService {
       // Si on a les prix, ajouter le prix du SOL
       if (includePrices) {
         try {
-          const solPrice = await priceService.getCurrentPrice('So11111111111111111111111111111111111111112');
+          // Utiliser getTokenPrice au lieu de getCurrentPrice
+          const solPrice = await priceService.getTokenPrice('So11111111111111111111111111111111111111112');
           if (solPrice) {
             solTokenAsset.data.price = {
               amount: solPrice.price,
@@ -354,12 +355,14 @@ class PortfolioAssetsService {
       const tokenAddresses = batch.map(token => token.data.address);
       
       // Récupérer les prix et métadonnées en parallèle
+      // Au lieu d'utiliser priceService.getCurrentPrice, utiliser directement priceService.getTokenPrice
       const pricePromises = tokenAddresses.map(address => 
-        priceService.getCurrentPrice(address).catch(() => null)
+        priceService.getTokenPrice(address).catch(() => null)
       );
       
+      // Au lieu d'utiliser priceService.getTokenInfo, utiliser jupiterService directement
       const metadataPromises = tokenAddresses.map(address => 
-        priceService.getTokenInfo(address).catch(() => null)
+        jupiterService.getTokenInfo(address).catch(() => null)
       );
       
       // Attendre que toutes les promesses soient résolues

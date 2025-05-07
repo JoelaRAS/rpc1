@@ -6,6 +6,15 @@ class CoinGeckoService {
     this.baseURL = this.apiKey 
       ? 'https://pro-api.coingecko.com/api/v3' 
       : 'https://api.coingecko.com/api/v3';
+    
+    // Table de correspondance pour les adresses de tokens Solana vers les ID CoinGecko
+    this.tokenAddressToId = {
+      'So11111111111111111111111111111111111111112': 'solana', // SOL
+      'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'usd-coin', // USDC
+      'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'tether', // USDT
+      'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So': 'msol', // mSOL
+      'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'bonk' // BONK
+    };
   }
 
   /**
@@ -173,6 +182,99 @@ class CoinGeckoService {
     } catch (error) {
       console.error(`Erreur lors de la récupération du prix historique pour ${id} à ${timestamp}:`, error);
       return null; // Retourner null au lieu de throw pour maintenir le service fonctionnel
+    }
+  }
+
+  /**
+   * Récupère le prix d'un token à partir de son adresse (compatibilité avec l'interface du priceService)
+   * @param {string} tokenAddress - Adresse du token (format Solana)
+   * @returns {Promise<Object>} - Données de prix formatées
+   */
+  async getTokenPrice(tokenAddress) {
+    try {
+      // Convertir l'adresse du token en ID CoinGecko si connue
+      const tokenId = this.tokenAddressToId[tokenAddress] || tokenAddress;
+      
+      // Si c'est une adresse non reconnue, on ne peut pas continuer
+      if (!this.tokenAddressToId[tokenAddress]) {
+        console.warn(`Adresse de token inconnue dans CoinGeckoService: ${tokenAddress}`);
+        return null;
+      }
+      
+      // Récupérer les données de prix
+      const priceData = await this.getPrice(tokenId, 'usd');
+      
+      if (priceData && priceData[tokenId] && priceData[tokenId].usd) {
+        // Formater la réponse pour correspondre au format attendu par priceService
+        return {
+          mint: tokenAddress,
+          symbol: tokenId.toUpperCase(),
+          name: tokenId.charAt(0).toUpperCase() + tokenId.slice(1).replace('-', ' '),
+          price: priceData[tokenId].usd,
+          priceUsd: priceData[tokenId].usd,
+          change24h: priceData[tokenId].usd_24h_change || 0
+        };
+      }
+      
+      console.warn(`Prix non disponible sur CoinGecko pour ${tokenAddress} (${tokenId})`);
+      return null;
+    } catch (error) {
+      console.error(`Erreur lors de la récupération du prix via CoinGecko pour ${tokenAddress}:`, error.message);
+      return null;
+    }
+  }
+  
+  /**
+   * Récupère l'historique des prix d'un token à une date spécifique
+   * @param {string} tokenId - ID du token ou adresse
+   * @param {number} timestamp - Timestamp Unix en secondes
+   * @returns {Promise<Object>} - Données de prix historiques formatées
+   */
+  async getHistoricalPrice(tokenId, timestamp) {
+    try {
+      // Convertir l'adresse du token en ID CoinGecko si connue
+      const geckoId = this.tokenAddressToId[tokenId] || tokenId;
+      
+      // Si c'est une adresse non reconnue, on ne peut pas continuer
+      if (!this.tokenAddressToId[tokenId] && tokenId.length > 20) {
+        console.warn(`Adresse de token inconnue pour l'historique dans CoinGeckoService: ${tokenId}`);
+        return null;
+      }
+      
+      const historicalData = await this.getPriceAtTimestamp(geckoId, timestamp);
+      
+      if (historicalData && historicalData.market_data && historicalData.market_data.current_price) {
+        const price = historicalData.market_data.current_price.usd;
+        
+        if (price) {
+          return {
+            price,
+            timestamp,
+            date: new Date(timestamp * 1000).toISOString(),
+            source: 'coingecko'
+          };
+        }
+      }
+      
+      console.warn(`Données historiques non disponibles sur CoinGecko pour ${tokenId} à ${new Date(timestamp * 1000).toISOString()}`);
+      return null;
+    } catch (error) {
+      console.error(`Erreur lors de la récupération de l'historique des prix via CoinGecko pour ${tokenId}:`, error.message);
+      return null;
+    }
+  }
+  
+  /**
+   * Récupère le prix de SOL en USD
+   * @returns {Promise<Object>} Prix de SOL
+   */
+  async getSolPrice() {
+    try {
+      const priceData = await this.getPrice('solana', 'usd');
+      return priceData.solana;
+    } catch (error) {
+      console.error('Erreur lors de la récupération du prix de SOL via CoinGecko:', error.message);
+      return { usd: 0 };
     }
   }
 }

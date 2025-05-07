@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const ResponseUtils = require('../utils/responseUtils');
 const portfolioAssetsService = require('../services/portfolioAssetsService');
+const cacheService = require('../services/cacheService');
 const { cacheMiddleware } = require('../utils/middlewareUtils');
 
 /**
@@ -18,7 +19,7 @@ const getPortfolioData = async (walletAddress, network, options = {}) => {
   
   const mergedOptions = { ...defaultOptions, ...options };
   
-  return await portfolioAssetsService.getWalletPortfolio(walletAddress, mergedOptions);
+  return await portfolioAssetsService.getAllPortfolioAssets(walletAddress, mergedOptions);
 };
 
 /**
@@ -58,7 +59,11 @@ router.get('/:walletAddress',
       const portfolioData = await getPortfolioData(walletAddress, network, options);
       
       // Mettre en cache les résultats pour les futures requêtes
-      portfolioAssetsService.cacheService.setWalletData(walletAddress, portfolioData);
+      try {
+        cacheService.setWalletData(walletAddress, portfolioData);
+      } catch (cacheError) {
+        console.warn(`Impossible de mettre en cache les données du portefeuille: ${cacheError.message}`);
+      }
       
       res.json(ResponseUtils.success(portfolioData));
     } catch (error) {
@@ -98,7 +103,11 @@ router.get('/portfolio-exact/:walletAddress',
       const portfolioData = await getPortfolioData(walletAddress, network, options);
       
       // Mettre en cache les résultats pour les futures requêtes
-      portfolioAssetsService.cacheService.setWalletData(walletAddress, portfolioData);
+      try {
+        cacheService.setWalletData(walletAddress, portfolioData);
+      } catch (cacheError) {
+        console.warn(`Impossible de mettre en cache les données du portefeuille: ${cacheError.message}`);
+      }
       
       res.json(ResponseUtils.success(portfolioData));
     } catch (error) {
