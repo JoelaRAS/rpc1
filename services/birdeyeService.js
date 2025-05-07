@@ -122,6 +122,126 @@ class BirdeyeService {
   }
 
   /**
+   * Récupère le prix historique d'un token à un moment précis
+   * @param {string} tokenAddress - Adresse du token
+   * @param {number} timestamp - Timestamp Unix en secondes
+   * @returns {Promise<Object|null>} - Données de prix ou null si non trouvé
+   */
+  async getHistoricalPrice(tokenAddress, timestamp) {
+    try {
+      console.log(`BirdEye: Récupération du prix historique pour ${tokenAddress} au timestamp ${timestamp}`);
+      
+      // Convertir le timestamp en secondes si nécessaire (l'API Birdeye attend des secondes)
+      const timeFromSec = Math.floor(timestamp - 3600); // 1 heure avant
+      const timeToSec = Math.floor(timestamp + 3600);   // 1 heure après
+      
+      // Obtenir une plage de prix autour du timestamp demandé
+      const response = await this.getTokenPriceHistory(
+        tokenAddress,
+        timeFromSec * 1000,
+        timeToSec * 1000,
+        '15m'  // Résolution de 15 minutes
+      );
+      
+      // Vérifier si nous avons des données
+      if (response && response.data && Array.isArray(response.data) && response.data.length > 0) {
+        // Trouver le point de données le plus proche du timestamp demandé
+        let closestData = response.data[0];
+        let minTimeDiff = Math.abs(closestData.timestamp - timestamp * 1000);
+        
+        for (const dataPoint of response.data) {
+          const timeDiff = Math.abs(dataPoint.timestamp - timestamp * 1000);
+          if (timeDiff < minTimeDiff) {
+            closestData = dataPoint;
+            minTimeDiff = timeDiff;
+          }
+        }
+        
+        // Si la différence est inférieure à 2 heures (7200 secondes), c'est assez précis
+        if (minTimeDiff <= 7200000) {
+          return {
+            mint: tokenAddress,
+            price: closestData.price,
+            priceUsd: closestData.price,
+            timestamp: Math.floor(closestData.timestamp / 1000),
+            date: new Date(closestData.timestamp).toISOString(),
+            source: 'birdeye'
+          };
+        }
+      }
+      
+      // Si pas de données ou pas assez précis, utiliser les fallbacks
+      return await this.getFallbackHistoricalPrice(tokenAddress, timestamp);
+    } catch (error) {
+      console.error(`Erreur lors de la récupération du prix historique Birdeye pour ${tokenAddress}:`, error.message);
+      return await this.getFallbackHistoricalPrice(tokenAddress, timestamp);
+    }
+  }
+
+  /**
+   * Méthode de repli pour récupérer le prix historique via d'autres services
+   * @private
+   */
+  async getFallbackHistoricalPrice(tokenAddress, timestamp) {
+    // Obtenir le symbole du token
+    const symbol = await this.getTokenSymbol(tokenAddress);
+    
+    if (!symbol) {
+      console.warn(`Impossible de déterminer le symbole pour ${tokenAddress}, prix historique non disponible`);
+      return null;
+    }
+    
+    try {
+      // Essayer CryptoCompare d'abord
+      const cryptoCompareData = await cryptoCompareService.getHistoricalPriceAt(symbol, 'USD', timestamp);
+      
+      if (cryptoCompareData && typeof cryptoCompareData === 'number' && cryptoCompareData > 0) {
+        return {
+          mint: tokenAddress,
+          price: cryptoCompareData,
+          priceUsd: cryptoCompareData,
+          timestamp,
+          date: new Date(timestamp * 1000).toISOString(),
+          source: 'cryptocompare'
+        };
+      }
+    } catch (error) {
+      console.warn(`Erreur lors de la récupération du prix historique CryptoCompare pour ${symbol}:`, error.message);
+    }
+    
+    // Si tout échoue, utiliser le prix actuel comme estimation pour les tests
+    try {
+      const currentPrice = await this.getTokenPrice(tokenAddress);
+      if (currentPrice && currentPrice.data && currentPrice.data.value > 0) {
+        return {
+          mint: tokenAddress,
+          price: currentPrice.data.value,
+          priceUsd: currentPrice.data.value,
+          timestamp,
+          date: new Date(timestamp * 1000).toISOString(),
+          source: 'estimated'
+        };
+      }
+    } catch (error) {
+      console.warn(`Erreur lors de la récupération du prix actuel pour ${tokenAddress}:`, error.message);
+    }
+    
+    // En dernier recours, utiliser un prix par défaut
+    if (this.defaultPrices[tokenAddress]) {
+      return {
+        mint: tokenAddress,
+        price: this.defaultPrices[tokenAddress],
+        priceUsd: this.defaultPrices[tokenAddress],
+        timestamp,
+        date: new Date(timestamp * 1000).toISOString(),
+        source: 'default'
+      };
+    }
+    
+    return null;
+  }
+
+  /**
    * Méthode de repli pour récupérer l'historique des prix via un autre service
    */
   async getFallbackPriceHistory(tokenAddress, fromTimestamp, toTimestamp) {

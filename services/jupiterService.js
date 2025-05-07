@@ -1,5 +1,5 @@
 const axios = require('axios');
-const priceService = require('./priceService');
+// Supprimer l'import de priceService pour éviter la dépendance circulaire
 const solanaWebService = require('./solanaWebService');
 
 // Constantes
@@ -341,12 +341,34 @@ class JupiterService {
    */
   async getTokenPrice(mint) {
     try {
-      // Utiliser le service de prix plutôt que de dupliquer la logique
-      const priceData = await priceService.getCurrentPrice(mint);
-      return priceData?.price || 0;
+      // Implémenter directement la logique de prix au lieu d'utiliser priceService
+      // pour éviter la dépendance circulaire
+      const params = {
+        ids: mint,
+        vsToken: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' // USDC
+      };
+
+      const headers = {};
+      if (this.apiKey) {
+        headers['Authorization'] = `Bearer ${this.apiKey}`;
+      }
+
+      const response = await axios.get('https://price.jup.ag/v4/price', {
+        params,
+        headers
+      });
+
+      if (response.data && response.data.data && response.data.data[mint]) {
+        return {
+          price: response.data.data[mint].price,
+          source: 'jupiter'
+        };
+      }
+      
+      return { price: 0, source: 'unknown' };
     } catch (error) {
       console.error(`[JupiterService] Erreur lors de la récupération du prix pour ${mint}: ${error.message}`);
-      return 0;
+      return { price: 0, source: 'error' };
     }
   }
 }

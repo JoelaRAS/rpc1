@@ -392,13 +392,12 @@ class PortfolioAssetsService {
       const batch = tokens.slice(i, i + batchSize);
       const tokenAddresses = batch.map(token => token.data.address);
       
-      // Récupérer les prix et métadonnées en parallèle
-      // Au lieu d'utiliser priceService.getCurrentPrice, utiliser directement priceService.getTokenPrice
+      // Récupérer les prix en utilisant birdeyeService pour éviter les problèmes avec priceService
       const pricePromises = tokenAddresses.map(address => 
-        priceService.getTokenPrice(address).catch(() => null)
+        birdeyeService.getTokenPrice(address).catch(() => null)
       );
       
-      // Au lieu d'utiliser priceService.getTokenInfo, utiliser jupiterService directement
+      // Récupérer les métadonnées en utilisant jupiterService
       const metadataPromises = tokenAddresses.map(address => 
         jupiterService.getTokenInfo(address).catch(() => null)
       );

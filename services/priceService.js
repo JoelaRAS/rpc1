@@ -1,564 +1,388 @@
 const axios = require('axios');
 const cacheService = require('./cacheService');
+const pythService = require('./pythService');
 const birdeyeService = require('./birdeyeService');
 const coinGeckoService = require('./coinGeckoService');
 const cryptoCompareService = require('./cryptoCompareService');
-const jupiterService = require('./jupiterService');
 
-// Priorité des services de prix
-const PRICE_SERVICES = ['birdeye', 'coingecko', 'cryptocompare'];
-
-// Configuration du circuit breaker
-const CIRCUIT_BREAKER = {
-  birdeye: { failures: 0, lastFailure: 0, threshold: 5, resetTimeMs: 60000 },
-  coingecko: { failures: 0, lastFailure: 0, threshold: 5, resetTimeMs: 60000 },
-  cryptocompare: { failures: 0, lastFailure: 0, threshold: 5, resetTimeMs: 60000 }
-};
-
-/**
- * Service pour la récupération des prix de tokens
- */
 const priceService = {
   /**
-   * Vérifie si un service est disponible ou en circuit ouvert
-   * @param {string} service - Nom du service
-   * @returns {boolean} - true si le service est disponible, false sinon
-   */
-  isServiceAvailable: function(service) {
-    if (!CIRCUIT_BREAKER[service]) return true;
-    
-    const circuitData = CIRCUIT_BREAKER[service];
-    
-    // Si le nombre d'échecs est inférieur au seuil, le service est disponible
-    if (circuitData.failures < circuitData.threshold) {
-      return true;
-    }
-    
-    // Vérifier si le temps de reset est écoulé
-    const currentTime = Date.now();
-    if (currentTime - circuitData.lastFailure > circuitData.resetTimeMs) {
-      // Réinitialiser le compteur d'échecs après la période de repos
-      circuitData.failures = 0;
-      return true;
-    }
-    
-    return false;
-  },
-  
-  /**
-   * Marquer un service comme ayant échoué
-   * @param {string} service - Nom du service
-   */
-  markServiceFailure: function(service) {
-    if (!CIRCUIT_BREAKER[service]) return;
-    
-    CIRCUIT_BREAKER[service].failures += 1;
-    CIRCUIT_BREAKER[service].lastFailure = Date.now();
-    
-    if (CIRCUIT_BREAKER[service].failures >= CIRCUIT_BREAKER[service].threshold) {
-      console.warn(`Circuit ouvert pour le service ${service} - Trop d'échecs consécutifs`);
-    }
-  },
-  
-  /**
-   * Marquer un service comme fonctionnant correctement
-   * @param {string} service - Nom du service
-   */
-  markServiceSuccess: function(service) {
-    if (!CIRCUIT_BREAKER[service]) return;
-    
-    // Réduire progressivement le compteur d'échecs en cas de succès
-    if (CIRCUIT_BREAKER[service].failures > 0) {
-      CIRCUIT_BREAKER[service].failures = Math.max(0, CIRCUIT_BREAKER[service].failures - 1);
-    }
-  },
-
-  /**
-   * Récupère le prix d'un token en utilisant tous les services disponibles
-   * @param {string} tokenMint - L'adresse du token
-   * @param {Object} options - Options de configuration
-   * @returns {Promise<Object>} - Prix et métadonnées du token
-   */
-  getTokenPrice: async function(tokenMint, options = {}) {
-    const { forceRefresh = false, serviceOverride = null } = options;
-    
-    try {
-      // 1. Vérifier d'abord le cache si le rafraîchissement forcé n'est pas demandé
-      if (!forceRefresh) {
-        const cachedPrice = cacheService.getPrice(tokenMint);
-        if (cachedPrice) {
-          return cachedPrice;
-        }
-      }
-      
-      // 2. Si un service spécifique est demandé, utiliser uniquement celui-ci
-      if (serviceOverride && PRICE_SERVICES.includes(serviceOverride)) {
-        // Vérifier si le service est disponible
-        if (!this.isServiceAvailable(serviceOverride)) {
-          throw new Error(`Le service ${serviceOverride} est temporairement indisponible (circuit ouvert)`);
-        }
-        return await this.getPriceFromService(tokenMint, serviceOverride);
-      }
-      
-      // 3. Sinon, essayer tous les services dans l'ordre de priorité
-      for (const service of PRICE_SERVICES) {
-        // Ignorer les services en circuit ouvert
-        if (!this.isServiceAvailable(service)) {
-          console.warn(`Service ${service} ignoré (circuit ouvert)`);
-          continue;
-        }
-        
-        try {
-          const priceData = await this.getPriceFromService(tokenMint, service);
-          if (priceData && priceData.price && priceData.price > 0) {
-            // Marquer le service comme fonctionnant
-            this.markServiceSuccess(service);
-            
-            // Mettre en cache le résultat
-            cacheService.setPrice(tokenMint, priceData);
-            return priceData;
-          }
-        } catch (serviceError) {
-          console.warn(`Erreur du service ${service} pour ${tokenMint}:`, serviceError.message);
-          // Marquer le service comme ayant échoué
-          this.markServiceFailure(service);
-          // Continuer avec le service suivant
-        }
-      }
-      
-      // 4. Si aucun service ne fonctionne, renvoyer un prix par défaut
-      return {
-        mint: tokenMint,
-        price: 0,
-        priceUsd: 0,
-        priceSol: 0,
-        source: 'none'
-      };
-    } catch (error) {
-      console.error('Erreur lors de la récupération du prix:', error.message);
-      throw new Error(`Impossible d'obtenir le prix pour ${tokenMint}: ${error.message}`);
-    }
-  },
-  
-  /**
    * Récupère le prix actuel d'un token
-   * @param {string} tokenMint - L'adresse du token
-   * @param {Object} options - Options de configuration
-   * @returns {Promise<Object>} - Prix et métadonnées du token
+   * @param {string} tokenMint - Adresse du token
+   * @returns {Promise<Object|null>} - Données de prix ou null si non trouvé
    */
-  getCurrentPrice: async function(tokenMint, options = {}) {
+  getCurrentPrice: async function(tokenMint) {
     try {
-      // Appeler getTokenPrice qui fait déjà tout ce qu'il faut
-      const priceData = await this.getTokenPrice(tokenMint, options);
-      return priceData;
-    } catch (error) {
-      console.error(`Erreur lors de la récupération du prix actuel pour ${tokenMint}:`, error.message);
-      return {
-        mint: tokenMint,
-        price: 0,
-        priceUsd: 0,
-        priceSol: 0,
-        source: 'error'
-      };
-    }
-  },
-  
-  /**
-   * Récupère les informations d'un token (métadonnées, symbole, nom, etc.)
-   * @param {string} tokenMint - L'adresse du token
-   * @returns {Promise<Object>} - Informations du token
-   */
-  getTokenInfo: async function(tokenMint) {
-    try {
-      // Vérifier d'abord le cache
-      const cachedInfo = cacheService.getTokenMetadata(tokenMint);
-      if (cachedInfo) {
-        return cachedInfo;
+      if (!tokenMint) {
+        console.warn('Token mint non fourni pour getCurrentPrice');
+        return null;
       }
       
-      // Essayer d'obtenir les infos via Jupiter qui a une bonne base de données de tokens
-      try {
-        const jupiterInfo = await jupiterService.getTokenInfo(tokenMint);
-        if (jupiterInfo) {
-          // Mettre en cache pour les prochaines demandes
-          cacheService.setTokenMetadata(tokenMint, jupiterInfo);
-          return jupiterInfo;
-        }
-      } catch (jupiterError) {
-        console.warn(`Erreur lors de la récupération des infos token via Jupiter pour ${tokenMint}:`, jupiterError.message);
-      }
+      const now = Math.floor(Date.now() / 1000);
+      const cacheKey = `token_price_${tokenMint}_${now}`;
       
-      // Si Jupiter échoue, essayer avec Birdeye
-      try {
-        const birdeyeInfo = await birdeyeService.getTokenMetadata(tokenMint);
-        if (birdeyeInfo && birdeyeInfo.data) {
-          const tokenInfo = {
-            address: tokenMint,
-            name: birdeyeInfo.data.name || 'Unknown Token',
-            symbol: birdeyeInfo.data.symbol || 'UNKNOWN',
-            decimals: birdeyeInfo.data.decimals || 0,
-            logoURI: birdeyeInfo.data.logoURI || null
-          };
-          
-          // Mettre en cache pour les prochaines demandes
-          cacheService.setTokenMetadata(tokenMint, tokenInfo);
-          return tokenInfo;
-        }
-      } catch (birdeyeError) {
-        console.warn(`Erreur lors de la récupération des infos token via Birdeye pour ${tokenMint}:`, birdeyeError.message);
-      }
-      
-      // Si aucune information n'est trouvée, retourner un objet par défaut
-      const defaultInfo = {
-        address: tokenMint,
-        name: `Token ${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`,
-        symbol: 'UNKNOWN',
-        decimals: 0,
-        logoURI: null
-      };
-      
-      return defaultInfo;
-    } catch (error) {
-      console.error(`Erreur lors de la récupération des informations du token ${tokenMint}:`, error.message);
-      return {
-        address: tokenMint,
-        name: `Token ${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`,
-        symbol: 'UNKNOWN',
-        decimals: 0,
-        logoURI: null,
-        error: true
-      };
-    }
-  },
-  
-  /**
-   * Récupère le prix d'un token à partir d'un service spécifique
-   * @param {string} tokenMint - L'adresse du token
-   * @param {string} service - Le service à utiliser ('birdeye', 'coingecko', 'cryptocompare')
-   * @returns {Promise<Object>} - Prix et métadonnées du token
-   */
-  getPriceFromService: async function(tokenMint, service) {
-    try {
-      let priceData = null;
-      
-      switch (service) {
-        case 'birdeye':
-          priceData = await birdeyeService.getTokenPrice(tokenMint);
-          break;
-        case 'coingecko':
-          priceData = await coinGeckoService.getTokenPrice(tokenMint);
-          break;
-        case 'cryptocompare':
-          priceData = await cryptoCompareService.getTokenPrice(tokenMint);
-          break;
-        default:
-          throw new Error(`Service de prix non supporté: ${service}`);
-      }
-      
-      if (priceData && priceData.price) {
-        return {
-          ...priceData,
-          source: service
-        };
-      }
-      
-      throw new Error(`Aucun prix trouvé pour ${tokenMint} avec le service ${service}`);
-    } catch (error) {
-      console.warn(`Erreur lors de la récupération du prix avec ${service}:`, error.message);
-      throw error;
-    }
-  },
-  
-  /**
-   * Récupère les prix de plusieurs tokens en parallèle
-   * @param {Array<string>} tokenMints - Liste d'adresses de tokens
-   * @param {Object} options - Options de configuration
-   * @returns {Promise<Object>} - Prix des tokens indexés par adresse
-   */
-  getBatchTokenPrices: async function(tokenMints, options = {}) {
-    try {
-      if (!Array.isArray(tokenMints) || tokenMints.length === 0) {
-        return {};
-      }
-      
-      // Limiter le nombre de requêtes parallèles pour éviter de surcharger les APIs
-      const batchSize = 10;
-      const results = {};
-      
-      // Traiter par lots
-      for (let i = 0; i < tokenMints.length; i += batchSize) {
-        const batch = tokenMints.slice(i, i + batchSize);
-        
-        // Créer un tableau de promesses pour le lot actuel
-        const promises = batch.map(mint => 
-          this.getTokenPrice(mint, options)
-            .catch(error => {
-              console.warn(`Erreur pour ${mint}:`, error.message);
-              return { mint, price: 0, error: error.message };
-            })
-        );
-        
-        // Attendre toutes les promesses du lot
-        const batchResults = await Promise.all(promises);
-        
-        // Ajouter les résultats du lot au résultat global
-        batchResults.forEach(result => {
-          if (result && result.mint) {
-            results[result.mint] = result;
-          }
-        });
-      }
-      
-      return results;
-    } catch (error) {
-      console.error('Erreur lors de la récupération des prix par lot:', error.message);
-      throw new Error(`Impossible d'obtenir les prix par lot: ${error.message}`);
-    }
-  },
-  
-  /**
-   * Récupère le prix historique d'un token à une date spécifique
-   * @param {string} tokenMint - L'adresse du token
-   * @param {number} timestamp - Le timestamp Unix en secondes
-   * @param {Object} options - Options supplémentaires
-   * @returns {Promise<Object>} - Données de prix historiques
-   */
-  getHistoricalPrice: async function(tokenMint, timestamp, options = {}) {
-    try {
-      // Vérifier si on a un cache pour cette requête
-      const cacheKey = `historical_${tokenMint}_${timestamp}`;
+      // Vérifier le cache d'abord
       const cachedPrice = cacheService.getPrice(cacheKey);
-      
-      if (cachedPrice && !options.forceRefresh) {
-        console.log(`Utilisation du cache pour le prix historique de ${tokenMint} à ${new Date(timestamp * 1000).toISOString()}`);
+      if (cachedPrice) {
         return cachedPrice;
       }
       
-      console.log(`Récupération du prix historique pour ${tokenMint} au timestamp ${timestamp}`);
-      
-      // Cas spécial pour SOL
-      const isSol = 
-        tokenMint === 'SOL' || 
-        tokenMint.toLowerCase() === 'so11111111111111111111111111111111111111112';
-      
-      // Essayer tous les services en ordre de priorité
-      for (const service of PRICE_SERVICES) {
-        // Ignorer les services en circuit ouvert
-        if (!this.isServiceAvailable(service)) {
-          console.warn(`Service ${service} ignoré pour le prix historique (circuit ouvert)`);
-          continue;
-        }
-        
-        try {
-          let historicalPrice = null;
-          
-          switch (service) {
-            case 'birdeye':
-              // Birdeye peut fournir des prix historiques précis
-              const birdeyeData = await birdeyeService.getTokenPriceAtTime(tokenMint, timestamp);
-              if (birdeyeData && birdeyeData.price && birdeyeData.price > 0) {
-                historicalPrice = {
-                  mint: tokenMint,
-                  price: birdeyeData.price,
-                  priceUsd: birdeyeData.price,
-                  timestamp: timestamp,
-                  date: new Date(timestamp * 1000).toISOString(),
-                  source: 'birdeye'
-                };
-              }
-              break;
-              
-            case 'coingecko':
-              // CoinGecko pour les tokens populaires
-              let symbol = isSol ? 'solana' : tokenMint;
-              const coingeckoData = await coinGeckoService.getHistoricalPrice(symbol, timestamp);
-              if (coingeckoData && coingeckoData.price && coingeckoData.price > 0) {
-                historicalPrice = {
-                  mint: tokenMint,
-                  price: coingeckoData.price,
-                  priceUsd: coingeckoData.price,
-                  timestamp: timestamp,
-                  date: new Date(timestamp * 1000).toISOString(),
-                  source: 'coingecko'
-                };
-              }
-              break;
-              
-            case 'cryptocompare':
-              // CryptoCompare pour SOL et tokens populaires
-              let cryptoSymbol = isSol ? 'SOL' : null;
-              // Pour les tokens USDC et USDT, on peut utiliser des valeurs connues
-              if (tokenMint.toLowerCase() === 'epjfwdd5aufqssqem2qn1xzybapC8G4wEGGkZwyTDt1v') {
-                cryptoSymbol = 'USDC';
-              }
-              
-              if (cryptoSymbol) {
-                const cryptoCompareData = await cryptoCompareService.getHistoricalPrice(cryptoSymbol, timestamp);
-                if (cryptoCompareData && cryptoCompareData.price && cryptoCompareData.price > 0) {
-                  historicalPrice = {
-                    mint: tokenMint,
-                    price: cryptoCompareData.price,
-                    priceUsd: cryptoCompareData.price,
-                    timestamp: timestamp,
-                    date: new Date(timestamp * 1000).toISOString(),
-                    source: 'cryptocompare'
-                  };
-                }
-              }
-              break;
-          }
-          
-          if (historicalPrice) {
-            // Marquer le service comme fonctionnant
-            this.markServiceSuccess(service);
-            
-            // Mettre en cache le résultat
-            cacheService.setPrice(cacheKey, historicalPrice, 3600); // Cache d'une heure
-            
-            console.log(`Prix historique trouvé pour ${tokenMint}: ${historicalPrice.price} USD (source: ${historicalPrice.source})`);
-            return historicalPrice;
-          }
-        } catch (serviceError) {
-          console.warn(`Erreur du service ${service} pour le prix historique de ${tokenMint}:`, serviceError.message);
-          // Marquer le service comme ayant échoué
-          this.markServiceFailure(service);
-          // Continuer avec le service suivant
-        }
-      }
-      
-      // Si c'est un stablecoin connu, on peut renvoyer 1 USD comme prix par défaut
-      if (
-        tokenMint.toLowerCase() === 'epjfwdd5aufqssqem2qn1xzybapC8G4wEGGkZwyTDt1v' || // USDC
-        tokenMint.toLowerCase() === 'es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'    // USDT
-      ) {
-        const stablecoinPrice = {
-          mint: tokenMint,
-          price: 1.0,
-          priceUsd: 1.0,
-          timestamp: timestamp,
-          date: new Date(timestamp * 1000).toISOString(),
-          source: 'default-stablecoin'
-        };
-        
-        // Mettre en cache le résultat
-        cacheService.setPrice(cacheKey, stablecoinPrice, 86400); // Cache d'un jour
-        
-        return stablecoinPrice;
-      }
-      
-      // Utiliser le prix actuel comme fallback
+      // Essayer d'abord BirdEye (priorité la plus élevée)
       try {
-        const currentPrice = await this.getTokenPrice(tokenMint);
-        if (currentPrice && currentPrice.price > 0) {
-          const fallbackPrice = {
-            ...currentPrice,
-            timestamp: timestamp,
-            date: new Date(timestamp * 1000).toISOString(),
-            note: 'Prix actuel utilisé comme fallback (historique non disponible)'
-          };
+        const birdeyePrice = await birdeyeService.getTokenPriceByMint(tokenMint);
+        if (birdeyePrice && birdeyePrice.price) {
+          console.log(`Prix obtenu de BirdEye pour ${tokenMint}: ${birdeyePrice.price} USD`);
           
-          // Mettre en cache avec une durée plus courte
-          cacheService.setPrice(cacheKey, fallbackPrice, 1800); // 30 minutes
-          
-          console.warn(`Utilisation du prix actuel comme fallback pour ${tokenMint}`);
-          return fallbackPrice;
+          // Mettre en cache le résultat
+          cacheService.setPrice(cacheKey, birdeyePrice, 300); // Cache de 5 minutes
+          return birdeyePrice;
         }
-      } catch (fallbackError) {
-        console.warn(`Échec du fallback pour ${tokenMint}:`, fallbackError.message);
+      } catch (error) {
+        console.warn(`Erreur BirdEye pour ${tokenMint}:`, error.message);
       }
       
-      // Si tout échoue, renvoyer un objet avec prix zéro
-      console.warn(`Aucun prix historique trouvé pour ${tokenMint} à ${new Date(timestamp * 1000).toISOString()}`);
-      return {
-        mint: tokenMint,
-        price: 0,
-        priceUsd: 0,
-        timestamp: timestamp,
-        date: new Date(timestamp * 1000).toISOString(),
-        source: 'none'
-      };
+      // Essayer avec Pyth comme seconde option
+      try {
+        const pythPrice = await pythService.getCurrentPrice(tokenMint);
+        if (pythPrice && pythPrice.price) {
+          console.log(`Prix obtenu de Pyth pour ${tokenMint}: ${pythPrice.price} USD`);
+          
+          // Mettre en cache le résultat
+          cacheService.setPrice(cacheKey, pythPrice, 300); // Cache de 5 minutes
+          return pythPrice;
+        }
+      } catch (error) {
+        console.warn(`Erreur Pyth pour ${tokenMint}:`, error.message);
+      }
+      
+      // Essayer avec CoinGecko comme troisième option
+      try {
+        const coingeckoPrice = await coinGeckoService.getTokenPriceByMint(tokenMint);
+        if (coingeckoPrice && coingeckoPrice.price) {
+          console.log(`Prix obtenu de CoinGecko pour ${tokenMint}: ${coingeckoPrice.price} USD`);
+          
+          // Mettre en cache le résultat
+          cacheService.setPrice(cacheKey, coingeckoPrice, 300); // Cache de 5 minutes
+          return coingeckoPrice;
+        }
+      } catch (error) {
+        console.warn(`Erreur CoinGecko pour ${tokenMint}:`, error.message);
+      }
+      
+      // Essayer avec CryptoCompare comme dernière option
+      try {
+        const cryptoComparePrice = await cryptoCompareService.getTokenPriceByMint(tokenMint);
+        if (cryptoComparePrice && cryptoComparePrice.price) {
+          console.log(`Prix obtenu de CryptoCompare pour ${tokenMint}: ${cryptoComparePrice.price} USD`);
+          
+          // Mettre en cache le résultat
+          cacheService.setPrice(cacheKey, cryptoComparePrice, 300); // Cache de 5 minutes
+          return cryptoComparePrice;
+        }
+      } catch (error) {
+        console.warn(`Erreur CryptoCompare pour ${tokenMint}:`, error.message);
+      }
+      
+      console.warn(`Aucun prix trouvé pour ${tokenMint} via toutes les sources disponibles`);
+      return null;
     } catch (error) {
-      console.error(`Erreur lors de la récupération du prix historique pour ${tokenMint}:`, error.message);
-      return {
-        mint: tokenMint,
-        price: 0,
-        priceUsd: 0,
-        timestamp: timestamp,
-        date: new Date(timestamp * 1000).toISOString(),
-        error: error.message,
-        source: 'error'
-      };
+      console.error(`Erreur générale dans getCurrentPrice pour ${tokenMint}:`, error.message);
+      return null;
     }
   },
-  
+
   /**
-   * Récupère le prix de SOL en USD
-   * @returns {Promise<number>} - Prix de SOL en USD
+   * Récupère le prix historique d'un token à un instant précis
+   * @param {string} tokenMint - Adresse du token
+   * @param {number} timestamp - Timestamp Unix en secondes
+   * @returns {Promise<Object|null>} - Données de prix ou null si non trouvé
    */
-  getSolPrice: async function() {
+  getHistoricalPrice: async function(tokenMint, timestamp) {
     try {
-      // Vérifier d'abord le cache
-      const cachedPrice = cacheService.getPrice('SOL');
+      if (!tokenMint || !timestamp) {
+        console.warn(`Paramètres invalides pour getHistoricalPrice: token=${tokenMint}, timestamp=${timestamp}`);
+        return null;
+      }
+      
+      // Créer une clé de cache unique pour cette paire token/timestamp
+      const cacheKey = `historical_price_${tokenMint}_${timestamp}`;
+      
+      // Vérifier le cache
+      const cachedPrice = cacheService.getPrice(cacheKey);
       if (cachedPrice) {
-        return cachedPrice.priceUsd || 0;
+        console.log(`Utilisation du cache pour le prix historique de ${tokenMint} à ${timestamp}`);
+        return cachedPrice;
       }
       
-      // Essayer tous les services
-      for (const service of PRICE_SERVICES) {
-        // Ignorer les services en circuit ouvert
-        if (!this.isServiceAvailable(service)) {
-          console.warn(`Service ${service} ignoré (circuit ouvert)`);
-          continue;
-        }
+      console.log(`Récupération du prix historique pour ${tokenMint} à ${timestamp} (${new Date(timestamp * 1000).toISOString()})`);
+      
+      // Stratégie de chute en cascade : essayer chaque source jusqu'à ce qu'une réussisse
+      
+      // 1. Essayer d'abord Pyth Network pour les prix historiques précis
+      try {
+        console.log(`Essai avec Pyth Network pour ${tokenMint} à ${timestamp}`);
+        const pythPrice = await pythService.getHistoricalPrice(tokenMint, timestamp);
         
-        try {
-          let solPrice = 0;
+        if (pythPrice && (pythPrice.price || pythPrice.priceUsd)) {
+          console.log(`Prix historique obtenu de Pyth pour ${tokenMint}: ${pythPrice.priceUsd || pythPrice.price} USD`);
           
-          switch (service) {
-            case 'birdeye':
-              const data = await birdeyeService.getTokenPrice('So11111111111111111111111111111111111111112');
-              solPrice = data && data.priceUsd ? data.priceUsd : 0;
-              break;
-            case 'coingecko':
-              const cgData = await coinGeckoService.getSolPrice();
-              solPrice = cgData && cgData.usd ? cgData.usd : 0;
-              break;
-            case 'cryptocompare':
-              const ccData = await cryptoCompareService.getSolPrice();
-              solPrice = ccData && ccData.USD ? ccData.USD : 0;
-              break;
-          }
+          // Ajouter des champs supplémentaires au résultat
+          const enrichedPrice = {
+            ...pythPrice,
+            mint: tokenMint,
+            timestamp,
+            date: new Date(timestamp * 1000).toISOString(),
+            source: 'pyth'
+          };
           
-          if (solPrice > 0) {
-            // Marquer le service comme fonctionnant
-            this.markServiceSuccess(service);
-            
-            // Mettre en cache le résultat
-            cacheService.setPrice('SOL', { 
-              mint: 'So11111111111111111111111111111111111111112', 
-              symbol: 'SOL', 
-              name: 'Solana', 
-              price: solPrice, 
-              priceUsd: solPrice, 
-              priceSol: 1, 
-              source: service 
-            });
-            return solPrice;
-          }
-        } catch (serviceError) {
-          console.warn(`Erreur du service ${service} pour SOL:`, serviceError.message);
-          // Marquer le service comme ayant échoué
-          this.markServiceFailure(service);
-          // Continuer avec le service suivant
+          // Mettre en cache le résultat pour une journée
+          cacheService.setPrice(cacheKey, enrichedPrice, 86400);
+          
+          return enrichedPrice;
         }
+        console.log(`Aucun prix disponible via Pyth pour ${tokenMint} à ${timestamp}`);
+      } catch (error) {
+        console.warn(`Erreur Pyth pour prix historique de ${tokenMint}:`, error.message);
       }
       
-      // Si aucun service ne fonctionne, renvoyer une valeur par défaut ou la dernière valeur connue
-      return 0;
+      // 2. Essayer BirdEye
+      try {
+        console.log(`Essai avec BirdEye pour ${tokenMint} à ${timestamp}`);
+        const birdeyePrice = await birdeyeService.getHistoricalPriceByMint(tokenMint, timestamp);
+        
+        if (birdeyePrice && birdeyePrice.price) {
+          console.log(`Prix historique obtenu de BirdEye pour ${tokenMint}: ${birdeyePrice.price} USD`);
+          
+          // Ajouter des champs supplémentaires au résultat
+          const enrichedPrice = {
+            ...birdeyePrice,
+            mint: tokenMint,
+            timestamp,
+            date: new Date(timestamp * 1000).toISOString(),
+            source: 'birdeye'
+          };
+          
+          // Mettre en cache le résultat pour une journée
+          cacheService.setPrice(cacheKey, enrichedPrice, 86400);
+          
+          return enrichedPrice;
+        }
+        console.log(`Aucun prix disponible via BirdEye pour ${tokenMint} à ${timestamp}`);
+      } catch (error) {
+        console.warn(`Erreur BirdEye pour prix historique de ${tokenMint}:`, error.message);
+      }
+      
+      // 3. Essayer CoinGecko
+      try {
+        console.log(`Essai avec CoinGecko pour ${tokenMint} à ${timestamp}`);
+        const coingeckoPrice = await coinGeckoService.getHistoricalPriceByMint(tokenMint, timestamp);
+        
+        if (coingeckoPrice && coingeckoPrice.price) {
+          console.log(`Prix historique obtenu de CoinGecko pour ${tokenMint}: ${coingeckoPrice.price} USD`);
+          
+          // Ajouter des champs supplémentaires au résultat
+          const enrichedPrice = {
+            ...coingeckoPrice,
+            mint: tokenMint,
+            timestamp,
+            date: new Date(timestamp * 1000).toISOString(),
+            source: 'coingecko'
+          };
+          
+          // Mettre en cache le résultat pour une journée
+          cacheService.setPrice(cacheKey, enrichedPrice, 86400);
+          
+          return enrichedPrice;
+        }
+        console.log(`Aucun prix disponible via CoinGecko pour ${tokenMint} à ${timestamp}`);
+      } catch (error) {
+        console.warn(`Erreur CoinGecko pour prix historique de ${tokenMint}:`, error.message);
+      }
+      
+      // 4. Essayer CryptoCompare
+      try {
+        console.log(`Essai avec CryptoCompare pour ${tokenMint} à ${timestamp}`);
+        const cryptoComparePrice = await cryptoCompareService.getHistoricalPriceByMint(tokenMint, timestamp);
+        
+        if (cryptoComparePrice && cryptoComparePrice.price) {
+          console.log(`Prix historique obtenu de CryptoCompare pour ${tokenMint}: ${cryptoComparePrice.price} USD`);
+          
+          // Ajouter des champs supplémentaires au résultat
+          const enrichedPrice = {
+            ...cryptoComparePrice,
+            mint: tokenMint,
+            timestamp,
+            date: new Date(timestamp * 1000).toISOString(),
+            source: 'cryptocompare'
+          };
+          
+          // Mettre en cache le résultat pour une journée
+          cacheService.setPrice(cacheKey, enrichedPrice, 86400);
+          
+          return enrichedPrice;
+        }
+        console.log(`Aucun prix disponible via CryptoCompare pour ${tokenMint} à ${timestamp}`);
+      } catch (error) {
+        console.warn(`Erreur CryptoCompare pour prix historique de ${tokenMint}:`, error.message);
+      }
+      
+      // 5. Stratégie de secours : utiliser le prix le plus proche temporellement
+      console.log(`Aucun prix historique exact trouvé, recherche du prix le plus proche pour ${tokenMint}`);
+      
+      // Essayer de trouver le prix actuel et l'utiliser comme approximation
+      try {
+        const currentPrice = await this.getCurrentPrice(tokenMint);
+        
+        if (currentPrice && (currentPrice.price || currentPrice.priceUsd)) {
+          console.log(`Utilisation du prix actuel comme approximation pour ${tokenMint}: ${currentPrice.price || currentPrice.priceUsd} USD`);
+          
+          const approximatedPrice = {
+            ...currentPrice,
+            mint: tokenMint,
+            timestamp,
+            date: new Date(timestamp * 1000).toISOString(),
+            source: `approximated_${currentPrice.source}`,
+            note: 'Prix approximé à partir du prix actuel'
+          };
+          
+          // Mettre en cache temporairement (valide uniquement quelques heures)
+          cacheService.setPrice(cacheKey, approximatedPrice, 3600 * 4);
+          
+          return approximatedPrice;
+        }
+      } catch (error) {
+        console.warn(`Erreur lors de l'approximation du prix pour ${tokenMint}:`, error.message);
+      }
+      
+      // Enregistrer un résultat nul pour éviter de retenter en permanence
+      const nullPrice = {
+        mint: tokenMint,
+        price: null,
+        priceUsd: null,
+        timestamp,
+        date: new Date(timestamp * 1000).toISOString(),
+        source: 'unknown',
+        note: 'Prix historique non disponible via aucune source'
+      };
+      
+      // Cache court pour les résultats nuls (1 heure) pour permettre de réessayer
+      cacheService.setPrice(cacheKey, nullPrice, 3600);
+      
+      console.warn(`Aucun prix historique disponible pour ${tokenMint} à ${timestamp} via toutes les sources`);
+      return nullPrice;
     } catch (error) {
-      console.error('Erreur lors de la récupération du prix de SOL:', error.message);
-      // Valeur par défaut en cas d'erreur
-      return 0;
+      console.error(`Erreur générale dans getHistoricalPrice pour ${tokenMint}:`, error.message);
+      return null;
+    }
+  },
+
+  /**
+   * Récupère l'historique complet des prix pour un jeton
+   * @param {string} tokenMint - Adresse du token
+   * @param {number} startTimestamp - Timestamp de début
+   * @param {number} endTimestamp - Timestamp de fin (optionnel, par défaut maintenant)
+   * @param {string} interval - Intervalle entre chaque point de données (1h, 1d, etc.)
+   * @returns {Promise<Object>} - Historique des prix
+   */
+  getPriceHistory: async function(tokenMint, startTimestamp, endTimestamp = Math.floor(Date.now() / 1000), interval = '1d') {
+    try {
+      if (!tokenMint || !startTimestamp) {
+        console.warn('Paramètres invalides pour getPriceHistory');
+        return {};
+      }
+      
+      console.log(`Récupération de l'historique des prix pour ${tokenMint} du ${new Date(startTimestamp * 1000).toISOString()} au ${new Date(endTimestamp * 1000).toISOString()}`);
+      
+      // Convertir l'intervalle en secondes
+      let intervalSeconds;
+      switch (interval.toLowerCase()) {
+        case '1h':
+          intervalSeconds = 3600;
+          break;
+        case '6h':
+          intervalSeconds = 21600;
+          break;
+        case '12h':
+          intervalSeconds = 43200;
+          break;
+        case '1d':
+        default:
+          intervalSeconds = 86400;
+          break;
+      }
+      
+      // Générer une liste de timestamps selon l'intervalle
+      const timestamps = [];
+      for (let ts = startTimestamp; ts <= endTimestamp; ts += intervalSeconds) {
+        timestamps.push(ts);
+      }
+      
+      // Ajouter le timestamp de fin s'il n'est pas déjà inclus
+      if (timestamps[timestamps.length - 1] !== endTimestamp) {
+        timestamps.push(endTimestamp);
+      }
+      
+      console.log(`Collecte des prix pour ${timestamps.length} points de données`);
+      
+      // Récupérer les prix pour chaque timestamp
+      const pricePromises = timestamps.map(ts => this.getHistoricalPrice(tokenMint, ts));
+      const prices = await Promise.all(pricePromises);
+      
+      // Construire un dictionnaire des prix indexés par timestamp
+      const priceHistory = {};
+      prices.forEach(price => {
+        if (price && price.timestamp) {
+          const key = `${tokenMint}-${price.timestamp}`;
+          priceHistory[key] = price;
+        }
+      });
+      
+      return priceHistory;
+    } catch (error) {
+      console.error(`Erreur dans getPriceHistory pour ${tokenMint}:`, error.message);
+      return {};
+    }
+  },
+
+  /**
+   * Récupère l'historique complet des prix pour plusieurs tokens
+   * @param {Array<string>} tokenMints - Liste d'adresses de tokens
+   * @param {number} startTimestamp - Timestamp de début
+   * @param {number} endTimestamp - Timestamp de fin (optionnel, par défaut maintenant)
+   * @param {string} interval - Intervalle entre chaque point de données (1h, 1d, etc.)
+   * @returns {Promise<Object>} - Historique des prix par token
+   */
+  getMultiTokenPriceHistory: async function(tokenMints, startTimestamp, endTimestamp = Math.floor(Date.now() / 1000), interval = '1d') {
+    try {
+      if (!Array.isArray(tokenMints) || tokenMints.length === 0 || !startTimestamp) {
+        console.warn('Paramètres invalides pour getMultiTokenPriceHistory');
+        return {};
+      }
+      
+      console.log(`Récupération de l'historique des prix pour ${tokenMints.length} tokens`);
+      
+      // Récupérer l'historique des prix pour chaque token
+      const tokenPromises = tokenMints.map(mint => {
+        return this.getPriceHistory(mint, startTimestamp, endTimestamp, interval)
+          .then(history => ({ mint, history }));
+      });
+      
+      const results = await Promise.all(tokenPromises);
+      
+      // Organiser les résultats par token
+      const priceHistoryByToken = {};
+      results.forEach(result => {
+        if (result && result.mint && result.history) {
+          const pathParts = result.mint.split('/');
+          const tokenId = pathParts[pathParts.length - 1];
+          priceHistoryByToken[tokenId] = result.history;
+        }
+      });
+      
+      return priceHistoryByToken;
+    } catch (error) {
+      console.error('Erreur dans getMultiTokenPriceHistory:', error.message);
+      return {};
     }
   }
 };

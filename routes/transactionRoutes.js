@@ -323,6 +323,7 @@ router.get('/history/:address', async (req, res, next) => {
 
     // Utiliser l'adresse fournie ou l'adresse de démo si demandé
     const targetAddress = useDemo === 'true' ? DEMO_ADDRESS : address;
+    
     console.log(`Récupération de l'historique des transactions pour ${targetAddress} (limite: ${parsedLimit})`);
     
     // 1. Récupérer l'historique des transactions via Helius
@@ -380,70 +381,136 @@ router.get('/history/:address', async (req, res, next) => {
       );
     }
     
-    // 3. Traiter chaque transaction pour la transformer au format Portfolio
+    // 3. Traiter chaque transaction pour obtenir le format Portfolio
     const portfolioTransactions = [];
     const tokenInfoMap = {};
-    const priceHistoryMap = {};
+    const priceHistoryMap = {}; // Stockera les prix historiques par token mint et timestamp
     
+    console.log(`Traitement de ${filteredTransactions.length} transactions au format Portfolio`);
+    
+    // Créer un ensemble pour suivre tous les tokens uniques dans toutes les transactions
+    const allTokenMints = new Set();
+    
+    // Première passe : identifier tous les tokens uniques impliqués
     for (const tx of filteredTransactions) {
+      const tokenMints = extractTokenMintsFromTransaction(tx);
+      tokenMints.add('So11111111111111111111111111111111111111112'); // Ajouter SOL car il est généralement impliqué
+      
+      // Ajouter chaque mint à l'ensemble global
+      for (const mint of tokenMints) {
+        allTokenMints.add(mint);
+      }
+    }
+    
+    console.log(`Total de ${allTokenMints.size} tokens uniques identifiés`);
+    
+    // Récupérer les métadonnées pour tous les tokens uniques
+    for (const mint of allTokenMints) {
       try {
-        // Extraction des tokens impliqués
-        const tokenMints = extractTokenMintsFromTransaction(tx);
-        
-        // Récupération des métadonnées des tokens si pas déjà dans le cache
-        for (const mint of tokenMints) {
-          if (!tokenInfoMap[mint]) {
-            try {
-              const jupiterAssetInfo = await jupiterService.getTokenInfo(mint);
-              if (jupiterAssetInfo) {
+        // Récupérer les métadonnées du token
+        if (!tokenInfoMap[mint]) {
+          try {
+            console.log(`Récupération des métadonnées pour ${mint}`);
+            const jupiterAssetInfo = await jupiterService.getTokenInfo(mint);
+            
+            if (jupiterAssetInfo) {
+              tokenInfoMap[mint] = {
+                address: mint,
+                name: jupiterAssetInfo.name || 'Unknown Token',
+                symbol: jupiterAssetInfo.symbol || 'UNKNOWN',
+                decimals: jupiterAssetInfo.decimals || 0,
+                logoURI: jupiterAssetInfo.logoURI || null,
+                tags: jupiterAssetInfo.tags || []
+              };
+            } else {
+              // Si Jupiter ne trouve pas le token, essayer d'obtenir des informations via Birdeye
+              const birdeyeInfo = await birdeyeService.getTokenMetadata(mint);
+              if (birdeyeInfo?.data) {
                 tokenInfoMap[mint] = {
                   address: mint,
-                  name: jupiterAssetInfo.name || 'Unknown Token',
-                  symbol: jupiterAssetInfo.symbol || 'UNKNOWN',
-                  decimals: jupiterAssetInfo.decimals || 0,
-                  logoURI: jupiterAssetInfo.logoURI || null,
-                  tags: jupiterAssetInfo.tags || []
+                  name: birdeyeInfo.data.name || 'Unknown Token',
+                  symbol: birdeyeInfo.data.symbol || 'UNKNOWN',
+                  decimals: birdeyeInfo.data.decimals || 0,
+                  logoURI: birdeyeInfo.data.logoURI || null,
+                  tags: []
                 };
-              } else {
-                // Si Jupiter ne trouve pas le token, essayer d'obtenir des informations via Birdeye
-                const birdeyeInfo = await birdeyeService.getTokenMetadata(mint);
-                if (birdeyeInfo?.data) {
-                  tokenInfoMap[mint] = {
-                    address: mint,
-                    name: birdeyeInfo.data.name || 'Unknown Token',
-                    symbol: birdeyeInfo.data.symbol || 'UNKNOWN',
-                    decimals: birdeyeInfo.data.decimals || 0,
-                    logoURI: birdeyeInfo.data.logoURI || null,
-                    tags: []
-                  };
-                }
               }
-            } catch (error) {
-              console.error(`Erreur lors de la récupération des infos token pour ${mint}:`, error.message);
             }
+          } catch (error) {
+            console.error(`Erreur lors de la récupération des infos token pour ${mint}:`, error.message);
           }
+        }
+      } catch (error) {
+        console.error(`Erreur lors du traitement du token ${mint}:`, error.message);
+      }
+    }
+    
+    // NOUVEAU: Capturer les prix historiques exacts pour chaque transaction
+    if (includePrices === 'true') {
+      console.log(`Capture des prix historiques pour toutes les transactions`);
+      
+      // Trier les transactions par ordre chronologique pour traiter les plus anciennes d'abord
+      const sortedTransactions = [...filteredTransactions].sort((a, b) => 
+        (a.blockTime || 0) - (b.blockTime || 0)
+      );
+      
+      // Préparer une liste de tous les tokens à traiter, en s'assurant que SOL est toujours inclus
+      const allTokensForPriceHistory = new Set(allTokenMints);
+      allTokensForPriceHistory.add('So11111111111111111111111111111111111111112'); // S'assurer que SOL est inclus
+      
+      for (const tx of sortedTransactions) {
+        if (tx.blockTime) {
+          // Extraire les tokens impliqués dans cette transaction spécifique
+          const txTokenMints = extractTokenMintsFromTransaction(tx);
+          txTokenMints.add('So11111111111111111111111111111111111111112'); // Ajouter toujours SOL
+          const tokenMintsArray = Array.from(txTokenMints);
           
-          // Récupérer le prix historique du token au moment de la transaction si demandé
-          if (includePrices === 'true' && tx.blockTime && !priceHistoryMap[mint]) {
-            try {
-              const historicalPrice = await priceService.getHistoricalPrice(mint, tx.blockTime);
-              if (historicalPrice) {
-                priceHistoryMap[mint] = historicalPrice;
-              }
-            } catch (error) {
-              console.error(`Erreur lors de la récupération du prix historique pour ${mint}:`, error.message);
+          // Capturer les prix exacts pour tous les tokens de cette transaction
+          console.log(`Capture des prix pour la transaction ${tx.signature} au timestamp ${tx.blockTime}`);
+          const transactionPrices = await priceService.captureTransactionPrices(tokenMintsArray, tx.blockTime);
+          
+          // Stocker les résultats pour chaque token impliqué
+          for (const mint of txTokenMints) {
+            if (transactionPrices[mint]) {
+              // Clé unique pour chaque combinaison token/timestamp
+              const priceKey = `${mint}-${tx.blockTime}`;
+              priceHistoryMap[priceKey] = transactionPrices[mint];
+            } else {
+              // Si le prix n'a pas été trouvé, ajouter un prix "unknown" pour éviter les valeurs manquantes
+              const priceKey = `${mint}-${tx.blockTime}`;
+              priceHistoryMap[priceKey] = {
+                price: null,
+                priceUsd: null,
+                source: 'unknown'
+              };
+              console.log(`Prix non trouvé pour ${mint} au timestamp ${tx.blockTime}, marqué comme "unknown"`);
             }
           }
         }
+      }
+    }
+    
+    // Deuxième passe : créer les transactions au format Portfolio
+    for (const tx of filteredTransactions) {
+      try {
+        // Extraire les tokens impliqués dans cette transaction
+        const tokenMints = extractTokenMintsFromTransaction(tx);
+        tokenMints.add('So11111111111111111111111111111111111111112'); // Ajouter SOL car il est généralement impliqué
         
         // Analyser l'activité financière
-        const financialActivity = await reconstructFinancialActivity(tx);
+        let financialActivity = { solChanges: [], tokenChanges: [] };
+        try {
+          financialActivity = await reconstructFinancialActivity(tx);
+        } catch (finError) {
+          console.error(`Erreur lors de l'analyse financière de la transaction ${tx.signature}:`, finError.message);
+          // Au lieu d'échouer, utiliser un objet partiel
+        }
         
         // Construire les BalanceChange selon le format Portfolio
         const balanceChanges = [
           // Changements de SOL
-          ...financialActivity.solChanges.map(solChange => {
-            const accountKey = tx.transaction.message.accountKeys[solChange.accountIndex].pubkey;
+          ...(financialActivity.solChanges || []).map(solChange => {
+            const accountKey = tx.transaction?.message?.accountKeys?.[solChange.accountIndex]?.pubkey || 'unknown';
             
             // Vérifier si c'est l'adresse du propriétaire (l'adresse demandée)
             const isOwnerAccount = accountKey === targetAddress;
@@ -472,7 +539,7 @@ router.get('/history/:address', async (req, res, next) => {
           }),
           
           // Changements de tokens
-          ...financialActivity.tokenChanges.map(tokenChange => {
+          ...(financialActivity.tokenChanges || []).map(tokenChange => {
             // Déterminer si ce changement concerne le propriétaire de l'adresse demandée
             const isOwnerAccount = tokenChange.owner === targetAddress;
             
@@ -499,7 +566,7 @@ router.get('/history/:address', async (req, res, next) => {
           })
         ];
         
-        // Déterminer les comptes affectés
+        // Déterminer les comptes affectés, avec gestion défensive des erreurs
         const accountChanges = {
           created: [],
           updated: [],
@@ -508,14 +575,22 @@ router.get('/history/:address', async (req, res, next) => {
         
         // Un compte est considéré "mis à jour" s'il a un changement de solde significatif
         const updatedAccounts = new Set();
-        financialActivity.solChanges.forEach(change => {
-          const accountKey = tx.transaction.message.accountKeys[change.accountIndex].pubkey;
-          updatedAccounts.add(accountKey);
+        (financialActivity.solChanges || []).forEach(change => {
+          if (tx.transaction?.message?.accountKeys?.[change.accountIndex]) {
+            const accountKey = tx.transaction.message.accountKeys[change.accountIndex].pubkey;
+            updatedAccounts.add(accountKey);
+          }
         });
         accountChanges.updated = Array.from(updatedAccounts);
         
-        // Déterminer le service (DeFi protocol ou autre)
-        const programIds = identifyInvolvedPrograms(tx);
+        // Déterminer le service (DeFi protocol ou autre) avec gestion défensive des erreurs
+        let programIds = new Set();
+        try {
+          programIds = identifyInvolvedPrograms(tx);
+        } catch (pidError) {
+          console.warn(`Erreur lors de l'identification des programmes pour ${tx.signature}:`, pidError.message);
+        }
+        
         const protocolName = identifyProtocol(programIds);
         
         const service = {
@@ -526,15 +601,15 @@ router.get('/history/:address', async (req, res, next) => {
           description: `Transaction via ${protocolName}`
         };
         
-        // Déterminer si c'est une transaction de spam
+        // Déterminer si c'est une transaction de spam avec gestion défensive
         const isSpamTransaction = 
-          financialActivity.solChanges.every(change => Math.abs(change.change) < 0.00001) &&
-          financialActivity.tokenChanges.every(change => Math.abs(change.change) < 0.00001) &&
-          tx.transaction.message.instructions.length > 10;
+          (financialActivity.solChanges || []).every(change => Math.abs(change.change) < 0.00001) &&
+          (financialActivity.tokenChanges || []).every(change => Math.abs(change.change) < 0.00001) &&
+          (tx.transaction?.message?.instructions?.length || 0) > 10;
         
-        // Construire la transaction au format Portfolio
+        // Construire la transaction au format Portfolio, même si certaines données sont partielles
         portfolioTransactions.push({
-          signature: tx.signature || tx.transaction?.signatures?.[0],
+          signature: tx.signature || tx.transaction?.signatures?.[0] || 'unknown',
           owner: targetAddress,
           blockTime: tx.blockTime || null,
           service,
@@ -543,11 +618,38 @@ router.get('/history/:address', async (req, res, next) => {
           isSigner: true,
           tags: isSpamTransaction ? ['spam'] : undefined,
           fees: tx.meta?.fee ? tx.meta.fee / 1e9 : null,
-          success: tx.meta?.err ? false : true
+          success: tx.meta?.err ? false : true,
+          _diagnostic: tx._fetchFailed ? {
+            fetchFailed: true,
+            fetchError: tx._fetchError,
+            message: "Transaction partiellement reconstruite à partir des données disponibles"
+          } : undefined
         });
       } catch (error) {
-        console.error(`Erreur lors du traitement de la transaction ${tx.signature}:`, error);
-        // Continuer avec la prochaine transaction en cas d'erreur
+        console.error(`Erreur lors du traitement de la transaction ${tx.signature || 'unknown'}:`, error);
+        
+        // Au lieu d'ignorer la transaction, l'inclure avec des informations d'erreur
+        portfolioTransactions.push({
+          signature: tx.signature || tx.transaction?.signatures?.[0] || 'unknown',
+          owner: targetAddress,
+          blockTime: tx.blockTime || null,
+          service: {
+            id: "error",
+            name: "Error Processing Transaction",
+            platformId: "error",
+            networkId: "solana",
+            description: "Une erreur est survenue lors du traitement de cette transaction"
+          },
+          balanceChanges: [],
+          accountChanges: { created: [], updated: [], closed: [] },
+          isSigner: true,
+          success: false,
+          _error: {
+            message: error.message,
+            stack: error.stack,
+            transaction: JSON.stringify(tx).length > 1000 ? "Transaction data too large" : JSON.stringify(tx)
+          }
+        });
       }
     }
     
@@ -562,7 +664,7 @@ router.get('/history/:address', async (req, res, next) => {
         'solana': tokenInfoMap
       },
       priceHistory: {
-        'solana': priceHistoryMap
+        'solana': {}
       },
       pagination: {
         before: filteredTransactions.length > 0 ? 
@@ -572,6 +674,43 @@ router.get('/history/:address', async (req, res, next) => {
       },
       isDemo: targetAddress === DEMO_ADDRESS
     };
+    
+    // Traiter séparément l'historique des prix pour chaque token et chaque transaction
+    for (const tx of filteredTransactions) {
+      if (tx.blockTime) {
+        // Pour chaque token impliqué dans cette transaction
+        const tokenMintsInTx = extractTokenMintsFromTransaction(tx);
+        tokenMintsInTx.add('So11111111111111111111111111111111111111112'); // Ajouter SOL
+        
+        for (const mint of tokenMintsInTx) {
+          // Clé unique pour cette transaction et ce token
+          const priceKey = `${mint}-${tx.blockTime}`;
+          
+          // Si nous avons déjà un prix pour ce token à ce timestamp, l'utiliser
+          if (priceHistoryMap[priceKey]) {
+            response.priceHistory.solana[priceKey] = {
+              mint,
+              price: priceHistoryMap[priceKey].price,
+              priceUsd: priceHistoryMap[priceKey].priceUsd,
+              timestamp: tx.blockTime,
+              date: new Date(tx.blockTime * 1000).toISOString(),
+              source: priceHistoryMap[priceKey].source || 'estimated'
+            };
+          } else {
+            // Si le prix n'est pas disponible, ajouter une entrée avec "unknown"
+            response.priceHistory.solana[priceKey] = {
+              mint,
+              price: null,
+              priceUsd: null,
+              timestamp: tx.blockTime,
+              date: new Date(tx.blockTime * 1000).toISOString(),
+              source: 'unknown'
+            };
+            console.log(`Ajout d'une entrée "unknown" pour ${mint} au timestamp ${tx.blockTime}`);
+          }
+        }
+      }
+    }
     
     res.json(response);
   } catch (error) {

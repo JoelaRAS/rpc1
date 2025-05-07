@@ -89,8 +89,18 @@ async function prefetchPopularTokens() {
   const priceService = require('./priceService');
   
   try {
-    await priceService.getBatchTokenPrices(POPULAR_TOKENS);
-    console.log('Préchargement terminé avec succès');
+    // Utiliser getCurrentPrice pour chaque token au lieu de getBatchTokenPrices
+    const promises = POPULAR_TOKENS.map(tokenMint => 
+      priceService.getCurrentPrice(tokenMint)
+        .catch(error => {
+          console.warn(`Échec du préchargement du prix pour ${tokenMint}:`, error.message);
+          return null;
+        })
+    );
+    
+    const results = await Promise.all(promises);
+    const validResults = results.filter(result => result !== null);
+    console.log(`Préchargement terminé avec succès: ${validResults.length}/${POPULAR_TOKENS.length} tokens`);
   } catch (error) {
     console.error('Erreur lors du préchargement des tokens:', error.message);
   }

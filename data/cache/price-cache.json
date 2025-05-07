@@ -1,73 +1,32 @@
 {
-  "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": {
-    "timestamp": 1746583918988,
-    "data": {
-      "mint": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
-      "symbol": "MSOL",
-      "name": "MSOL",
-      "price": 191.21,
-      "priceUsd": 191.21,
-      "change24h": 0,
-      "source": "cryptocompare"
-    }
+  "current-DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": {
+    "price": 0.00001676,
+    "priceUsd": 0.00001676,
+    "timestamp": 1746625636865,
+    "source": "birdeye"
   },
-  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": {
-    "timestamp": 1746583918901,
-    "data": {
-      "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-      "symbol": "TETHER",
-      "name": "Tether",
-      "price": 0.99998,
-      "priceUsd": 0.99998,
-      "change24h": 0.00864467627991997,
-      "source": "coingecko"
-    }
+  "current-mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": {
+    "price": 190.07,
+    "priceUsd": 190.07,
+    "timestamp": 1746625636877,
+    "source": "birdeye"
   },
-  "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": {
-    "timestamp": 1746583919055,
-    "data": {
-      "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-      "symbol": "BONK",
-      "name": "BONK",
-      "price": 0.00001712,
-      "priceUsd": 0.00001712,
-      "change24h": 0,
-      "source": "cryptocompare"
-    }
+  "current-Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": {
+    "price": 0.999995706768344,
+    "priceUsd": 0.999995706768344,
+    "timestamp": 1746625636932,
+    "source": "birdeye"
   },
-  "So11111111111111111111111111111111111111112": {
-    "timestamp": 1746583918995,
-    "data": {
-      "mint": "So11111111111111111111111111111111111111112",
-      "symbol": "SOL",
-      "name": "SOL",
-      "price": 147.75,
-      "priceUsd": 147.75,
-      "change24h": 0,
-      "source": "cryptocompare"
-    }
+  "current-So11111111111111111111111111111111111111112": {
+    "price": 146.973363117104,
+    "priceUsd": 146.973363117104,
+    "timestamp": 1746625636955,
+    "source": "birdeye"
   },
-  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
-    "timestamp": 1746583918990,
-    "data": {
-      "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-      "symbol": "USDC",
-      "name": "USDC",
-      "price": 0.9999,
-      "priceUsd": 0.9999,
-      "change24h": 0,
-      "source": "cryptocompare"
-    }
-  },
-  "historical_So11111111111111111111111111111111111111112_1745597848": {
-    "timestamp": 1746582842059,
-    "data": {
-      "mint": "So11111111111111111111111111111111111111112",
-      "price": 150.92,
-      "priceUsd": 150.92,
-      "timestamp": 1745597848,
-      "date": "2025-04-25T16:17:28.000Z",
-      "source": "cryptocompare"
-    }
+  "current-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+    "price": 1.00000055008658,
+    "priceUsd": 1.00000055008658,
+    "timestamp": 1746625637132,
+    "source": "birdeye"
   }
 }

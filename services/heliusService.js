@@ -83,18 +83,35 @@ class HeliusService {
         this.getTransaction(sig.signature)
           .catch(err => {
             console.error(`Erreur pour la transaction ${sig.signature}: ${err.message}`);
-            return null;
+            // Au lieu de retourner null, retourner un objet avec des informations minimales
+            return {
+              transaction: {
+                signatures: [sig.signature],
+                message: {
+                  accountKeys: []
+                }
+              },
+              meta: {
+                err: true,
+                errorReason: err.message
+              },
+              blockTime: sig.blockTime,
+              slot: sig.slot,
+              _fetchFailed: true, // Marqueur pour indiquer que la récupération a échoué
+              _fetchError: err.message // Message d'erreur pour le débogage
+            };
           })
       );
       
-      // 3. Attendre toutes les requêtes et filtrer les échecs
+      // 3. Attendre toutes les requêtes
       const transactions = await Promise.all(transactionPromises);
-      const validTransactions = transactions.filter(tx => tx !== null);
       
-      console.log(`Récupéré les détails de ${validTransactions.length}/${signatures.length} transactions`);
+      // 4. Ne plus filtrer les échecs, mais compter les réussites vs échecs
+      const successCount = transactions.filter(tx => !tx._fetchFailed).length;
+      console.log(`Récupéré les détails de ${successCount}/${signatures.length} transactions (${transactions.length - successCount} échecs conservés)`);
       
-      // 4. Pour chaque transaction, ajouter sa signature
-      return validTransactions.map((tx, index) => {
+      // 5. Pour chaque transaction, ajouter sa signature
+      return transactions.map((tx, index) => {
         return {
           ...tx,
           signature: signatures[index].signature
