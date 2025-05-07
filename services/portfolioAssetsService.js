@@ -93,26 +93,54 @@ class PortfolioAssetsService {
       }
     }
     
-    // 2. Récupération des tokens SPL
-    console.log(`PortfolioAssetsService: Récupération des tokens SPL pour ${walletAddress}`);
-    let tokenAccounts = [];
+    // 2. Récupérer tous les assets (tokens et NFTs) avec la nouvelle méthode Helius
+    console.log(`PortfolioAssetsService: Récupération des assets pour ${walletAddress} via Helius`);
+    let allAssetsData = { nfts: [], tokens: [] };
+
     try {
-      tokenAccounts = await heliusService.getTokenBalances(walletAddress);
+      // Utiliser la nouvelle méthode qui distingue mieux les tokens des NFTs
+      allAssetsData = await heliusService.getAssetsByOwnerWithSeparation(walletAddress);
+      console.log(`PortfolioAssetsService: Récupéré ${allAssetsData.nfts.length} NFTs et ${allAssetsData.tokens.length} tokens via Helius`);
     } catch (error) {
-      console.warn(`PortfolioAssetsService: Erreur lors de la récupération des tokens via Helius: ${error.message}`);
-      // Essayer un fallback avec Alchemy
+      console.warn(`PortfolioAssetsService: Erreur lors de la récupération des assets via Helius: ${error.message}`);
+      
+      // En cas d'échec, utiliser les méthodes traditionnelles pour récupérer les tokens
       try {
-        const alchemyBalances = await alchemyService.getBalances(walletAddress);
-        if (alchemyBalances.tokenAccounts) {
-          tokenAccounts = alchemyBalances.tokenAccounts;
-        }
-      } catch (backupError) {
-        console.error(`PortfolioAssetsService: Erreur du fallback pour les tokens: ${backupError.message}`);
+        const tokenAccounts = await heliusService.getTokenBalances(walletAddress);
+        console.log(`PortfolioAssetsService: Fallback - Récupéré ${tokenAccounts.length} comptes de tokens via getTokenBalances`);
+      } catch (tokenError) {
+        console.error(`PortfolioAssetsService: Erreur du fallback pour les tokens: ${tokenError.message}`);
       }
     }
     
-    // 3. Créer des assets formattés selon le modèle de portfolio
-    const formattedTokens = this._formatTokenAccountsToPortfolioAssets(tokenAccounts);
+    // 3. Récupération des tokens SPL (si la nouvelle méthode a échoué)
+    console.log(`PortfolioAssetsService: Récupération des tokens SPL pour ${walletAddress}`);
+    let tokenAccounts = [];
+    if (allAssetsData.tokens.length === 0) {
+      try {
+        tokenAccounts = await heliusService.getTokenBalances(walletAddress);
+      } catch (error) {
+        console.warn(`PortfolioAssetsService: Erreur lors de la récupération des tokens via Helius: ${error.message}`);
+        // Essayer un fallback avec Alchemy
+        try {
+          const alchemyBalances = await alchemyService.getBalances(walletAddress);
+          if (alchemyBalances.tokenAccounts) {
+            tokenAccounts = alchemyBalances.tokenAccounts;
+          }
+        } catch (backupError) {
+          console.error(`PortfolioAssetsService: Erreur du fallback pour les tokens: ${backupError.message}`);
+        }
+      }
+    }
+    
+    // 3b. Formater les tokens
+    // Si nous avons des tokens via la nouvelle méthode, les utiliser, sinon utiliser les méthodes traditionnelles
+    let formattedTokens = [];
+    if (allAssetsData.tokens.length > 0) {
+      formattedTokens = this._formatHeliusAssetsToPortfolioAssets(allAssetsData.tokens);
+    } else {
+      formattedTokens = this._formatTokenAccountsToPortfolioAssets(tokenAccounts);
+    }
     console.log(`PortfolioAssetsService: ${formattedTokens.length} tokens formatés`);
     
     // 4. Récupération des prix (si demandé)
@@ -121,25 +149,35 @@ class PortfolioAssetsService {
       await this._enrichTokensWithPrices(formattedTokens);
     }
     
-    // 5. Récupération des NFTs (si demandé)
+    // 5. Récupération des NFTs (si demandé et si la nouvelle méthode a échoué)
     let nfts = [];
     if (includeNFTs) {
-      console.log(`PortfolioAssetsService: Récupération des NFTs pour ${walletAddress}`);
-      try {
-        nfts = await metaplexService.getNFTsByOwner(walletAddress);
-      } catch (error) {
-        console.warn(`PortfolioAssetsService: Erreur lors de la récupération des NFTs via Metaplex: ${error.message}`);
-        // Essayer un fallback avec Helius
+      // Si nous avons déjà récupéré les NFTs avec la nouvelle méthode, les utiliser
+      if (allAssetsData.nfts.length > 0) {
+        nfts = allAssetsData.nfts;
+        console.log(`PortfolioAssetsService: ${nfts.length} NFTs récupérés via la nouvelle méthode Helius`);
+      } else {
+        // Sinon, utiliser les méthodes traditionnelles
+        console.log(`PortfolioAssetsService: Récupération des NFTs pour ${walletAddress} via méthodes traditionnelles`);
         try {
-          nfts = await heliusService.getNFTsForOwner(walletAddress);
-        } catch (backupError) {
-          console.error(`PortfolioAssetsService: Erreur du fallback pour les NFTs: ${backupError.message}`);
+          nfts = await metaplexService.getNFTsByOwner(walletAddress);
+        } catch (error) {
+          console.warn(`PortfolioAssetsService: Erreur lors de la récupération des NFTs via Metaplex: ${error.message}`);
+          // Essayer un fallback avec Helius
+          try {
+            nfts = await heliusService.getNFTsForOwner(walletAddress);
+          } catch (backupError) {
+            console.error(`PortfolioAssetsService: Erreur du fallback pour les NFTs: ${backupError.message}`);
+          }
         }
       }
     }
     
     // Formatter les NFTs selon le modèle de portfolio
-    const formattedNFTs = this._formatNFTsToPortfolioAssets(nfts);
+    // Choisir la méthode de formatage en fonction de la source des NFTs
+    const formattedNFTs = allAssetsData.nfts.length > 0 
+      ? this._formatHeliusNFTsToPortfolioAssets(allAssetsData.nfts)
+      : this._formatNFTsToPortfolioAssets(nfts);
     console.log(`PortfolioAssetsService: ${formattedNFTs.length} NFTs formatés`);
     
     // 6. Récupération des tokens stakés (si demandé)
@@ -273,7 +311,7 @@ class PortfolioAssetsService {
       duration: endTime - startTime
     };
   }
-  
+
   /**
    * Formate les comptes de tokens en assets de portfolio
    * @private
@@ -579,6 +617,148 @@ class PortfolioAssetsService {
       console.error(`PortfolioAssetsService: Erreur lors de la récupération du solde SOL alternatif: ${error.message}`);
       return { lamports: 0, sol: 0 };
     }
+  }
+
+  /**
+   * Formate les tokens depuis l'API Helius getAssetsByOwner en assets de portfolio
+   * @private
+   * @param {Array<Object>} tokens - Tokens depuis Helius
+   * @returns {Array<Object>} - Assets de portfolio pour les tokens
+   */
+  _formatHeliusAssetsToPortfolioAssets(tokens) {
+    if (!Array.isArray(tokens) || tokens.length === 0) {
+      return [];
+    }
+    
+    return tokens.filter(token => token && token.id).map(token => {
+      // Extraire les informations pertinentes du token
+      const mintAddress = token.id;
+      
+      // Extraire le montant du token (différents formats possibles selon Helius)
+      let amount = 0;
+      if (token.ownership && token.ownership.amount) {
+        // Nouveau format Helius
+        amount = token.ownership.amount;
+        // Si le token a des décimales, ajuster le montant
+        if (token.tokenInfo && token.tokenInfo.decimals) {
+          amount = amount / (10 ** token.tokenInfo.decimals);
+        }
+      } else if (token.amount) {
+        // Format direct
+        amount = token.amount;
+      }
+      
+      // Extraire les métadonnées
+      const name = token.content?.metadata?.name || token.metadata?.name || token.name || `Token ${mintAddress.slice(0, 4)}...${mintAddress.slice(-4)}`;
+      const symbol = token.content?.metadata?.symbol || token.metadata?.symbol || token.symbol || "UNKNOWN";
+      const decimals = token.tokenInfo?.decimals || token.decimals || 0;
+      const logoURI = token.content?.links?.image || token.content?.metadata?.image || token.metadata?.image || null;
+      
+      // Créer l'asset au format portfolio
+      return {
+        networkId: 'solana',
+        type: this.constructor.ASSET_TYPES.TOKEN,
+        value: { amount: 0, currency: 'usd' }, // Sera mis à jour plus tard avec les prix
+        attributes: {},
+        name,
+        imageUri: logoURI,
+        data: {
+          address: mintAddress,
+          amount,
+          price: { amount: 0, currency: 'usd' }, // Sera mis à jour plus tard avec les prix
+          symbol,
+          decimals
+        }
+      };
+    });
+  }
+  
+  /**
+   * Formate les NFTs depuis l'API Helius getAssetsByOwner en assets de portfolio
+   * @private
+   * @param {Array<Object>} nfts - NFTs depuis Helius
+   * @returns {Array<Object>} - Assets de portfolio pour les NFTs
+   */
+  _formatHeliusNFTsToPortfolioAssets(nfts) {
+    if (!Array.isArray(nfts) || nfts.length === 0) {
+      return [];
+    }
+    
+    return nfts.filter(nft => nft && nft.id).map(nft => {
+      // Extraire les informations pertinentes du NFT
+      const address = nft.id;
+      const name = nft.content?.metadata?.name || nft.metadata?.name || nft.name || 'Unknown NFT';
+      const description = nft.content?.metadata?.description || nft.metadata?.description || nft.description || '';
+      const imageUri = nft.content?.links?.image || nft.content?.files?.[0]?.uri || nft.content?.metadata?.image || nft.metadata?.image || null;
+      
+      // Traitement des informations de collection
+      let collection = null;
+      if (nft.grouping && nft.grouping.length > 0) {
+        // Trouver le premier groupement qui est une collection
+        const collectionGroup = nft.grouping.find(g => g.group_key === 'collection');
+        if (collectionGroup) {
+          collection = {
+            id: collectionGroup.group_value,
+            name: collectionGroup.collection_metadata?.name || 'Unknown Collection',
+            floorPrice: { 
+              amount: collectionGroup.collection_metadata?.floorPrice || 0, 
+              currency: 'usd' 
+            }
+          };
+        }
+      } else if (nft.collection) {
+        collection = {
+          id: nft.collection.key || nft.collection.address || '',
+          name: nft.collection.name || 'Unknown Collection',
+          floorPrice: { amount: nft.collection.floorPrice || 0, currency: 'usd' }
+        };
+      }
+      
+      // Traitement des attributs
+      const attributes = [];
+      if (nft.content?.metadata?.attributes && Array.isArray(nft.content.metadata.attributes)) {
+        nft.content.metadata.attributes.forEach(attr => {
+          attributes.push({
+            trait_type: attr.trait_type || attr.name || 'Unknown',
+            value: attr.value || ''
+          });
+        });
+      } else if (nft.attributes && Array.isArray(nft.attributes)) {
+        nft.attributes.forEach(attr => {
+          attributes.push({
+            trait_type: attr.trait_type || attr.name || 'Unknown',
+            value: attr.value || ''
+          });
+        });
+      }
+      
+      // Créer l'asset au format portfolio
+      return {
+        networkId: 'solana',
+        type: this.constructor.ASSET_TYPES.COLLECTIBLE,
+        value: { 
+          amount: collection?.floorPrice?.amount || 0, 
+          currency: 'usd' 
+        },
+        attributes: {
+          isDeprecated: false,
+          isClaimable: false,
+          tags: []
+        },
+        name,
+        imageUri,
+        data: {
+          address,
+          amount: 1,
+          price: { amount: collection?.floorPrice?.amount || 0, currency: 'usd' },
+          name,
+          description,
+          imageUri,
+          attributes,
+          collection
+        }
+      };
+    });
   }
 }
 

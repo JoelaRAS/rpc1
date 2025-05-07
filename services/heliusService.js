@@ -4,6 +4,7 @@ class HeliusService {
   constructor() {
     this.apiKey = process.env.HELIUS_API_KEY;
     this.baseURL = `https://mainnet.helius-rpc.com/?api-key=${this.apiKey}`;
+    this.specificHeliusUrl = "https://mainnet.helius-rpc.com/?api-key=f67b5652-9d49-4fd7-9286-e927ec98a6dc";
   }
 
   /**
@@ -163,6 +164,81 @@ class HeliusService {
     } catch (error) {
       console.error('Erreur lors de la récupération des NFTs:', error);
       return []; // Retourner un tableau vide en cas d'erreur
+    }
+  }
+
+  /**
+   * Récupère les assets d'un portefeuille en utilisant l'API spécifique Helius
+   * Cette méthode permet une meilleure distinction entre tokens et NFTs
+   * @param {string} walletAddress - L'adresse du portefeuille
+   * @param {number} page - Numéro de page pour la pagination
+   * @param {number} limit - Nombre d'éléments par page
+   * @returns {Promise<Array>} - Les assets du portefeuille
+   */
+  async getAssetsByOwner(walletAddress, page = 1, limit = 1000) {
+    try {
+      console.log(`Récupération des assets pour ${walletAddress} via l'API Helius spécifique (page ${page})`);
+      
+      const response = await axios.post(this.specificHeliusUrl, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getAssetsByOwner",
+        params: {
+          ownerAddress: walletAddress,
+          page: page,
+          limit: limit
+        }
+      });
+
+      // Vérifier la structure de la réponse
+      if (response.data && response.data.result) {
+        const assets = response.data.result.items || response.data.result;
+        console.log(`Récupéré ${assets.length} assets pour ${walletAddress}`);
+        return assets;
+      } else {
+        console.warn('Format de réponse Helius inattendu pour les assets:', response.data);
+        return [];
+      }
+    } catch (error) {
+      console.error('Erreur lors de la récupération des assets via Helius:', error.message);
+      if (error.response) {
+        console.error('Détails de l\'erreur Helius:', error.response.data);
+      }
+      return []; // Retourner un tableau vide en cas d'erreur
+    }
+  }
+  
+  /**
+   * Version améliorée qui distingue mieux les NFTs des tokens fongibles
+   * @param {string} walletAddress - L'adresse du portefeuille
+   * @returns {Promise<{nfts: Array, tokens: Array}>} - Les NFTs et tokens séparés
+   */
+  async getAssetsByOwnerWithSeparation(walletAddress) {
+    try {
+      const assets = await this.getAssetsByOwner(walletAddress);
+      
+      // Séparer les NFTs des tokens fongibles
+      const nfts = [];
+      const tokens = [];
+      
+      for (const asset of assets) {
+        // Si l'asset a un attribut "content" ou "metadata" et une édition de 0 ou 1, c'est probablement un NFT
+        if ((asset.content || asset.metadata) && (!asset.tokenInfo || asset.tokenInfo.supply === 1)) {
+          nfts.push(asset);
+        } else {
+          tokens.push(asset);
+        }
+      }
+      
+      console.log(`Séparation des assets: ${nfts.length} NFTs et ${tokens.length} tokens fongibles`);
+      
+      return {
+        nfts,
+        tokens
+      };
+    } catch (error) {
+      console.error('Erreur lors de la séparation des assets:', error.message);
+      return { nfts: [], tokens: [] };
     }
   }
 }
